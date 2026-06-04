@@ -14,6 +14,7 @@ if [ -z "$SOCKET_NAME" ]; then
 fi
 EXPLICIT_SOCKET_PATH=${NEWMUX_SOCKET_PATH:-$SOCKET_PATH}
 MARKER="${TMPDIR:-/tmp}/newmux-restore-tab-$(id -u)-$SOCKET_NAME"
+REQUEST_QUEUE_DIR="$MARKER.queue"
 REQUEST_LOCK_DIR="$MARKER.request-lock"
 REQUEST_STAMP="$MARKER.requested"
 REQUEST_DEBOUNCE_MS=${NEWMUX_RESTORE_REQUEST_DEBOUNCE_MS:-0}
@@ -72,17 +73,38 @@ open_ghostty_surface()
 	trace_restore "open_ghostty_surface.applescript.end"
 }
 
-write_restore_request()
+restore_field()
+{
+	text=$1
+	name=$2
+	printf '%s\n' "$text" |
+		awk -v name="$name" '{
+			for (i = 1; i <= NF; i++) {
+				split($i, field, "=")
+				if (field[1] == name) {
+					print substr($i, length(name) + 2)
+					exit
+				}
+			}
+		}'
+}
+
+write_restore_ticket()
 {
 	sequence=$1
-	tmp="$MARKER.$$"
+	kind=$2
+	created_ms=$(trace_now_ms)
+	mkdir -p "$REQUEST_QUEUE_DIR"
+	tmp="$REQUEST_QUEUE_DIR/.ticket-$created_ms-$sequence-$$"
+	ticket="$REQUEST_QUEUE_DIR/$created_ms-$sequence-$$.ticket"
 
 	{
-		printf 'kind=window_request\n'
+		printf 'kind=%s\n' "$kind"
 		printf 'sequence=%s\n' "$sequence"
 		printf 'created_at=%s\n' "$(date +%s)"
+		printf 'created_ms=%s\n' "$created_ms"
 	} > "$tmp"
-	mv "$tmp" "$MARKER"
+	mv "$tmp" "$ticket"
 }
 
 now_ms()
@@ -120,29 +142,21 @@ trap 'rmdir "$REQUEST_LOCK_DIR" 2>/dev/null || true' EXIT
 
 trace_restore "enter" "socket_name=$SOCKET_NAME" \
 	"socket_path=${EXPLICIT_SOCKET_PATH:-}" "marker=$MARKER"
-trace_restore "list_recent.start"
-RECENT=$(newmux_cmd newmux-list-recently-closed 2>/dev/null || true)
-trace_restore "list_recent.end" \
-	"count=$(printf '%s\n' "$RECENT" | sed '/^$/d' | wc -l | tr -d ' ')"
-if [ -z "$RECENT" ]; then
-	trace_restore "exit.empty_stack"
-	exit 0
-fi
 if [ "$REQUEST_DEBOUNCE_MS" -gt 0 ] && request_was_recent; then
 	trace_restore "exit.debounced" "debounce_ms=$REQUEST_DEBOUNCE_MS"
 	exit 0
 fi
-now_ms > "$REQUEST_STAMP"
-
-RECENT_TYPE=$(printf '%s\n' "$RECENT" | awk 'NR == 1 { print $2 }')
-if [ "$RECENT_TYPE" = pane ]; then
-	trace_restore "restore_pane.start"
-	newmux_cmd newmux-reopen-latest-closed -P >/dev/null 2>&1 || true
-	trace_restore "restore_pane.end"
+trace_restore "reserve_latest.start"
+RESERVED=$(newmux_cmd newmux-reserve-latest-closed -P 2>/dev/null || true)
+trace_restore "reserve_latest.end" "result=${RESERVED:-}"
+if [ -z "$RESERVED" ]; then
+	trace_restore "exit.empty_stack"
 	exit 0
 fi
+now_ms > "$REQUEST_STAMP"
 
-RESTORE_SEQUENCE=$(printf '%s\n' "$RECENT" | awk 'NR == 1 { print $1 }')
+RESERVED_TYPE=$(restore_field "$RESERVED" kind)
+RESTORE_SEQUENCE=$(restore_field "$RESERVED" sequence)
 case "$RESTORE_SEQUENCE" in
 	''|*[!0-9]*)
 		trace_restore "exit.bad_sequence" "sequence=$RESTORE_SEQUENCE"
@@ -150,9 +164,23 @@ case "$RESTORE_SEQUENCE" in
 		;;
 esac
 
-trace_restore "write_request.start" "sequence=$RESTORE_SEQUENCE" \
-	"type=$RECENT_TYPE"
-write_restore_request "$RESTORE_SEQUENCE"
-trace_restore "write_request.end" "sequence=$RESTORE_SEQUENCE"
+if [ "$RESERVED_TYPE" = pane ]; then
+	trace_restore "claim_reserved_pane.start" "sequence=$RESTORE_SEQUENCE"
+	newmux_cmd newmux-claim-reserved-closed -P \
+		-S "$RESTORE_SEQUENCE" >/dev/null 2>&1 || true
+	trace_restore "claim_reserved_pane.end" "sequence=$RESTORE_SEQUENCE"
+	exit 0
+fi
+
+if [ "$RESERVED_TYPE" != window ]; then
+	trace_restore "exit.bad_type" "type=$RESERVED_TYPE" \
+		"sequence=$RESTORE_SEQUENCE"
+	exit 0
+fi
+
+trace_restore "write_ticket.start" "sequence=$RESTORE_SEQUENCE" \
+	"type=$RESERVED_TYPE"
+write_restore_ticket "$RESTORE_SEQUENCE" "$RESERVED_TYPE"
+trace_restore "write_ticket.end" "sequence=$RESTORE_SEQUENCE"
 open_ghostty_surface
 trace_restore "exit.after_open"

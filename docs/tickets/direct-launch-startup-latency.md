@@ -108,6 +108,23 @@ path was restored:
     already fast. Remaining time is mostly frontend/native-tab dispatch and
     shell-script round trips. If `Last login` is visible in manual use, that is
     a separate unpatched/normal-Ghostty launch path before Newmux gets control.
+- `testing/test-newmux-gf-fast-restore-attach.sh` after server-side
+  reservation and queued restore tickets.
+  - Passed with restored window `@1`.
+  - Restore attach latency: 334 ms.
+  - Burst restore subcase passed:
+    - deleted three recoverable windows
+    - reserved all three before any startup claim
+    - restored in LIFO order: `@6 @5 @4`
+  - Trace evidence:
+    `.local/newmux-golden-runs/gf-fast-restore-attach-21170/restore-trace.tsv`
+  - New hot path:
+    - `newmux-reserve-latest-closed -P` reserves the latest item immediately.
+    - startup consumes a queued ticket.
+    - `newmux-claim-reserved-closed -P -S <sequence>` restores exactly that
+      reserved item.
+    - final attach skips the redundant `has-session` probe and execs
+      `bin/newmux attach-session` directly.
 
 The manual five-tab latency diagnostic was intentionally not used as pass/fail
 evidence for this fix.

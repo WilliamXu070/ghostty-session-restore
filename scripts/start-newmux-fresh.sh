@@ -2,11 +2,13 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+CONF="$ROOT/config/newmux-dev.tmux.conf"
 SOCKET_NAME=${NEWMUX_SOCKET:-newmux-dev}
 SOCKET_PATH=${NEWMUX_SOCKET_PATH:-}
 PRIMARY_SESSION=${NEWMUX_SESSION:-newmux}
 ATTACH_UNREPRESENTED=${NEWMUX_ATTACH_UNREPRESENTED:-0}
 RESTORE_MARKER="${TMPDIR:-/tmp}/newmux-restore-tab-$(id -u)-$SOCKET_NAME"
+RESTORE_QUEUE_DIR="$RESTORE_MARKER.queue"
 RESTORE_CLAIM_DIR="$RESTORE_MARKER.claim"
 RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-5}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
@@ -75,6 +77,7 @@ has_attached_clients()
 clear_detached_recovery_state()
 {
 	rm -f "$RESTORE_MARKER" "$RESTORE_MARKER.requested"
+	rm -rf "$RESTORE_QUEUE_DIR"
 	rmdir "$RESTORE_CLAIM_DIR" 2>/dev/null || true
 	rmdir "$RESTORE_MARKER.request-lock" 2>/dev/null || true
 	newmux newmux-clear-recently-closed >/dev/null 2>&1 || true
@@ -84,6 +87,7 @@ clear_detached_recovery_state()
 clear_restore_marker_files()
 {
 	rm -f "$RESTORE_MARKER" "$RESTORE_MARKER.requested"
+	rm -rf "$RESTORE_QUEUE_DIR"
 	rmdir "$RESTORE_CLAIM_DIR" 2>/dev/null || true
 	rmdir "$RESTORE_MARKER.request-lock" 2>/dev/null || true
 }
@@ -134,30 +138,57 @@ validate_window_id()
 	esac
 }
 
-claim_requested_restore_window_id()
+claim_next_restore_ticket_sequence()
 {
-	request_sequence=$1
-	trace_restore "claim_requested.list_recent.start" \
-		"sequence=$request_sequence"
-	recent=$(newmux newmux-list-recently-closed 2>/dev/null || true)
-	trace_restore "claim_requested.list_recent.end" \
-		"sequence=$request_sequence" \
-		"count=$(printf '%s\n' "$recent" | sed '/^$/d' | wc -l | tr -d ' ')"
-	recent_sequence=$(printf '%s\n' "$recent" | awk 'NR == 1 { print $1 }')
-	recent_type=$(printf '%s\n' "$recent" | awk 'NR == 1 { print $2 }')
-	if [ "$recent_sequence" != "$request_sequence" ] ||
-		[ "$recent_type" != window ]; then
-		trace_restore "claim_requested.stack_mismatch" \
-			"request_sequence=$request_sequence" \
-			"recent_sequence=$recent_sequence" "recent_type=$recent_type"
+	ticket=
+	[ -d "$RESTORE_QUEUE_DIR" ] || return 1
+	for candidate in "$RESTORE_QUEUE_DIR"/*.ticket; do
+		[ -e "$candidate" ] || break
+		if [ -z "$ticket" ] ||
+			[ "$(basename "$candidate")" \< "$(basename "$ticket")" ]; then
+			ticket=$candidate
+		fi
+	done
+	[ -n "$ticket" ] || return 1
+
+	claim_ticket="$ticket.claim.$$"
+	if ! mv "$ticket" "$claim_ticket" 2>/dev/null; then
+		return 2
+	fi
+	sequence=$(awk -F= '$1 == "sequence" { print $2; exit }' \
+		"$claim_ticket" 2>/dev/null || true)
+	kind=$(awk -F= '$1 == "kind" { print $2; exit }' \
+		"$claim_ticket" 2>/dev/null || true)
+	rm -f "$claim_ticket"
+
+	if [ "$kind" != window ]; then
+		trace_restore "claim_ticket.bad_kind" "kind=$kind" \
+			"sequence=$sequence"
 		return 3
 	fi
+	case "$sequence" in
+		''|*[!0-9]*)
+			trace_restore "claim_ticket.bad_sequence" \
+				"sequence=$sequence"
+			return 3
+			;;
+	esac
 
-	trace_restore "claim_requested.reopen.start" \
+	trace_restore "claim_ticket.read" "sequence=$sequence" \
+		"kind=$kind"
+	printf '%s\n' "$sequence"
+	return 0
+}
+
+claim_reserved_restore_window_id()
+{
+	request_sequence=$1
+	trace_restore "claim_reserved.reopen.start" \
 		"sequence=$request_sequence"
-	result=$(newmux newmux-reopen-latest-closed -P \
-		-t "$PRIMARY_SESSION:" 2>/dev/null || true)
-	trace_restore "claim_requested.reopen.end" \
+	result=$(newmux newmux-claim-reserved-closed -P \
+		-S "$request_sequence" -t "$PRIMARY_SESSION:" \
+		2>/dev/null || true)
+	trace_restore "claim_reserved.reopen.end" \
 		"sequence=$request_sequence" "result=${result:-}"
 	if [ -z "$result" ]; then
 		return 3
@@ -166,12 +197,12 @@ claim_requested_restore_window_id()
 	window_id=$(restore_field "$result" window_id)
 	if [ "$restore_kind" != window ] ||
 		! validate_window_id "$window_id"; then
-		trace_restore "claim_requested.bad_result" \
+		trace_restore "claim_reserved.bad_result" \
 			"kind=$restore_kind" "window_id=$window_id"
 		return 3
 	fi
 
-	trace_restore "claim_requested.ok" "window_id=$window_id"
+	trace_restore "claim_reserved.ok" "window_id=$window_id"
 	printf '%s\n' "$window_id"
 	return 0
 }
@@ -179,19 +210,35 @@ claim_requested_restore_window_id()
 claim_restore_window_id()
 {
 	trace_restore "claim_marker.start"
+	if ! mkdir "$RESTORE_CLAIM_DIR" 2>/dev/null; then
+		trace_restore "claim_marker.busy" "claim_dir=$RESTORE_CLAIM_DIR"
+		return 2
+	fi
+	if ticket_sequence=$(claim_next_restore_ticket_sequence); then
+		claim_reserved_restore_window_id "$ticket_sequence"
+		return $?
+	fi
+	ticket_status=$?
+	if [ "$ticket_status" -eq 2 ]; then
+		return 2
+	fi
+	if [ "$ticket_status" -eq 3 ]; then
+		finish_restore_claim
+		return 3
+	fi
+
 	if [ ! -f "$RESTORE_MARKER" ]; then
 		trace_restore "claim_marker.missing"
+		finish_restore_claim
 		return 1
 	fi
 	if restore_marker_is_stale; then
 		rm -f "$RESTORE_MARKER"
 		trace_restore "claim_marker.stale"
+		finish_restore_claim
 		return 1
 	fi
-	if ! mkdir "$RESTORE_CLAIM_DIR" 2>/dev/null; then
-		trace_restore "claim_marker.busy" "claim_dir=$RESTORE_CLAIM_DIR"
-		return 2
-	fi
+
 	kind=$(awk -F= '$1 == "kind" { print $2; exit }' \
 		"$RESTORE_MARKER" 2>/dev/null || true)
 	sequence=$(awk -F= '$1 == "sequence" { print $2; exit }' \
@@ -210,7 +257,7 @@ claim_restore_window_id()
 					return 3
 					;;
 			esac
-			if requested_window=$(claim_requested_restore_window_id \
+			if requested_window=$(claim_reserved_restore_window_id \
 				"$sequence"); then
 				printf '%s\n' "$requested_window"
 				return 0
@@ -260,20 +307,19 @@ attach_native_tab_to_window()
 	fi
 	trace_restore "attach.select_window.end" "window_id=$window_id" \
 		"tab_session=$tab_session"
-	trace_restore "attach.has_session.start" "tab_session=$tab_session"
-	if ! newmux has-session -t "$tab_session" >/dev/null 2>&1; then
-		trace_restore "attach.has_session.failed" "tab_session=$tab_session"
-		exec "$ROOT/scripts/run-newmux.sh" new-session -A -s "$PRIMARY_SESSION"
-	fi
-	trace_restore "attach.has_session.end" "tab_session=$tab_session"
 	if [ "${NEWMUX_STARTER_PRINT_WINDOW:-0}" != 0 ]; then
 		trace_restore "attach.print_window" "window_id=$window_id"
 		printf '%s\n' "$window_id"
 		exit 0
 	fi
-	trace_restore "attach.exec_run_newmux" "window_id=$window_id" \
+	trace_restore "attach.exec_newmux" "window_id=$window_id" \
 		"tab_session=$tab_session"
-	exec "$ROOT/scripts/run-newmux.sh" attach-session -t "$tab_session"
+	if [ -n "$SOCKET_PATH" ]; then
+		exec "$ROOT/bin/newmux" -S "$SOCKET_PATH" -f "$CONF" \
+			attach-session -t "$tab_session"
+	fi
+	exec "$ROOT/bin/newmux" -L "$SOCKET_NAME" -f "$CONF" \
+		attach-session -t "$tab_session"
 }
 
 cleanup_unattached_native_tab_sessions()

@@ -188,6 +188,41 @@ wait_for_represented_window()
 	return 1
 }
 
+create_recoverable_window()
+{
+	label=$1
+	window_id=$(newmux_cmd -f "$CONF" new-window -d -P \
+		-F '#{window_id}' -t "$PRIMARY:")
+	pane_id=$(pane_for_window "$PRIMARY" "$window_id")
+	marker="__NEWMUX_FAST_RESTORE_BURST_${label}_${SOCKET_NAME}_$$"
+	newmux_cmd -f "$CONF" send-keys -t "$pane_id" -l \
+		"printf '${marker}\\n${marker}_2\\n${marker}_3\\n'"
+	newmux_cmd -f "$CONF" send-keys -t "$pane_id" Enter
+	assert_capture_contains_at_least "$window_id" "$marker" 2 \
+		"05-burst-${label}-ready"
+	printf '%s\n' "$window_id"
+}
+
+request_reserved_restore_without_open()
+{
+	NEWMUX_SOCKET="$SOCKET_NAME" \
+	NEWMUX_SOCKET_PATH="${NEWMUX_SOCKET_PATH:-}" \
+	NEWMUX_RESTORE_OPEN_TAB=0 \
+	NEWMUX_RESTORE_TRACE_FILE="${NEWMUX_RESTORE_TRACE_FILE:-}" \
+		"$ROOT/scripts/request-newmux-restore-tab.sh" \
+		"${NEWMUX_SOCKET_PATH:-}" >/dev/null 2>&1 || true
+}
+
+claim_reserved_restore_tab()
+{
+	NEWMUX_SOCKET="$SOCKET_NAME" \
+	NEWMUX_SOCKET_PATH="${NEWMUX_SOCKET_PATH:-}" \
+	NEWMUX_STARTER_ASSUME_CLIENTS=1 \
+	NEWMUX_STARTER_PRINT_WINDOW=1 \
+	NEWMUX_RESTORE_TRACE_FILE="${NEWMUX_RESTORE_TRACE_FILE:-}" \
+		"$ROOT/scripts/start-newmux-fresh.sh" 2>/dev/null || true
+}
+
 if [ ! -x "$NEWMUX" ]; then
 	"$ROOT/scripts/build-newmux.sh"
 fi
@@ -278,9 +313,61 @@ if [ "$latency_ms" -gt "$MAX_RESTORE_MS" ]; then
 	exit 1
 fi
 
+burst_w1=$(create_recoverable_window one)
+burst_w2=$(create_recoverable_window two)
+burst_w3=$(create_recoverable_window three)
+newmux_cmd -f "$CONF" newmux-soft-delete-window \
+	-t "$PRIMARY:$burst_w1" >/dev/null
+newmux_cmd -f "$CONF" newmux-soft-delete-window \
+	-t "$PRIMARY:$burst_w2" >/dev/null
+newmux_cmd -f "$CONF" newmux-soft-delete-window \
+	-t "$PRIMARY:$burst_w3" >/dev/null
+if ! wait_for_recovery_count 3; then
+	record_golden_evidence "05-burst-delete-stack-wrong"
+	echo "burst delete did not create three recoverable tabs" >&2
+	echo "evidence=$GOLDEN_RUN_DIR" >&2
+	exit 1
+fi
+record_golden_evidence "05-burst-after-delete"
+
+trace_test "burst_reserve.start" \
+	"expected=${burst_w3},${burst_w2},${burst_w1}"
+request_reserved_restore_without_open
+request_reserved_restore_without_open
+request_reserved_restore_without_open
+trace_test "burst_reserve.end"
+if ! wait_for_recovery_count 0; then
+	record_golden_evidence "06-burst-reserve-stack-not-empty"
+	echo "burst reserve should remove all three items from visible stack" >&2
+	echo "evidence=$GOLDEN_RUN_DIR" >&2
+	exit 1
+fi
+
+burst_r1=$(claim_reserved_restore_tab)
+burst_r2=$(claim_reserved_restore_tab)
+burst_r3=$(claim_reserved_restore_tab)
+burst_actual="$burst_r1 $burst_r2 $burst_r3"
+burst_expected="$burst_w3 $burst_w2 $burst_w1"
+if [ "$burst_actual" != "$burst_expected" ]; then
+	record_golden_evidence "07-burst-restore-order-wrong"
+	echo "burst restore order mismatch" >&2
+	echo "actual=$burst_actual" >&2
+	echo "expected=$burst_expected" >&2
+	echo "evidence=$GOLDEN_RUN_DIR" >&2
+	exit 1
+fi
+assert_capture_contains "$burst_w1" "__NEWMUX_FAST_RESTORE_BURST_one" \
+	"07-burst-w1-restored"
+assert_capture_contains "$burst_w2" "__NEWMUX_FAST_RESTORE_BURST_two" \
+	"07-burst-w2-restored"
+assert_capture_contains "$burst_w3" "__NEWMUX_FAST_RESTORE_BURST_three" \
+	"07-burst-w3-restored"
+record_golden_evidence "07-burst-after-restore"
+
 echo "newmux gf-fast-restore-attach UI test passed"
 echo "  restored_window=$delete_window"
 echo "  latency_ms=$latency_ms"
 echo "  max_ms=$MAX_RESTORE_MS"
+echo "  burst_restored=$burst_actual"
 echo "  evidence=$GOLDEN_RUN_DIR"
 print_restore_trace_summary
