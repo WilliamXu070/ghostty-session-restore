@@ -1285,6 +1285,7 @@ struct window_pane {
 #define PANE_THEMECHANGED 0x2000
 #define PANE_UNSEENCHANGES 0x4000
 #define PANE_REDRAWSCROLLBAR 0x8000
+#define PANE_NEWMUX_HISTORY_PROTECTED 0x10000
 
 	u_int		 sb_slider_y;
 	u_int		 sb_slider_h;

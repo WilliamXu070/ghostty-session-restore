@@ -1998,6 +1998,11 @@ screen_write_clearscreen(struct screen_write_ctx *ctx, u_int bg)
 void
 screen_write_clearhistory(struct screen_write_ctx *ctx)
 {
+	if (ctx->wp != NULL &&
+	    (ctx->wp->flags & PANE_NEWMUX_HISTORY_PROTECTED)) {
+		ctx->wp->flags &= ~PANE_NEWMUX_HISTORY_PROTECTED;
+		return;
+	}
 	grid_clear_history(ctx->s->grid);
 }
 

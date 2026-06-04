@@ -1429,6 +1429,11 @@ fn execCommand(
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
     if (comptime builtin.target.os.tag.isDarwin()) darwin: {
+        if (std.posix.getenv("NEWMUX_GHOSTTY_SKIP_LOGIN")) |value| {
+            if (value.len != 0 and !std.mem.eql(u8, value, "0"))
+                break :darwin;
+        }
+
         const passwd = passwdpkg.get(alloc) catch |err| {
             log.warn("failed to read passwd, not using a login shell err={}", .{err});
             break :darwin;
