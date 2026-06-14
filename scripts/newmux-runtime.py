@@ -250,6 +250,8 @@ def link_window_at_region(
     by_id = {row["window"]: row for row in rows}
     left = item.get("left_neighbor")
     right = item.get("right_neighbor")
+    original_index = item.get("original_index")
+    max_index = max((row["index"] for row in rows), default=-1)
 
     if left in by_id:
         newmux(
@@ -279,8 +281,8 @@ def link_window_at_region(
         )
         return "before_right_neighbor"
 
-    index = item.get("original_index")
-    if isinstance(index, int):
+    if isinstance(original_index, int):
+        index = min(max(original_index, 0), max_index + 1)
         try:
             newmux(
                 socket_path,
