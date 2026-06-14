@@ -1,0 +1,57 @@
+{
+  "name": "cmd-w-binding-headed-clean-delete",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "cmd_t",
+      "from": "start"
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_t"
+    },
+    {
+      "do": "cmd_w_binding",
+      "from": "after_cmd_t",
+      "target": "latest_window"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_w"
+    }
+  ],
+  "expect": [
+    {
+      "state": "start",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "state": "after_cmd_t",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "lifo": 0
+    },
+    {
+      "state": "after_cmd_w",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    }
+  ]
+}

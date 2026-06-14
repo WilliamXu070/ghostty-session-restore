@@ -356,6 +356,14 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
     override func addTitlebarAccessoryViewController(_ childViewController: NSTitlebarAccessoryViewController) {
         let isTabBar = self.titlebarTabs && isTabBar(childViewController)
 
+        if NewmuxUIFlag.enabled && isTabBar {
+            childViewController.identifier = Self.tabBarIdentifier
+            childViewController.view.isHidden = true
+            childViewController.view.frame.size.height = 0
+            super.addTitlebarAccessoryViewController(childViewController)
+            return
+        }
+
         if isTabBar {
             // Ensure it has the right layoutAttribute to force it next to our titlebar
             childViewController.layoutAttribute = .right

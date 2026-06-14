@@ -68,7 +68,8 @@ open_ghostty_surface()
 	fi
 	trace_restore "open_ghostty_surface.applescript.start"
 	osascript \
-		-e 'tell application "System Events" to key code 17 using command down' \
+		-e 'tell application "Ghostty" to activate' \
+		-e 'tell application "Ghostty" to new tab in front window' \
 		>/dev/null 2>&1 || true
 	trace_restore "open_ghostty_surface.applescript.end"
 }
@@ -105,6 +106,22 @@ write_restore_ticket()
 		printf 'created_ms=%s\n' "$created_ms"
 	} > "$tmp"
 	mv "$tmp" "$ticket"
+}
+
+write_window_marker()
+{
+	window_id=$1
+	created_ms=$(trace_now_ms)
+	tmp="$MARKER.runtime-restore.$$"
+
+	{
+		printf 'kind=window\n'
+		printf 'source=runtime_lifo\n'
+		printf 'window_id=%s\n' "$window_id"
+		printf 'created_at=%s\n' "$(date +%s)"
+		printf 'created_ms=%s\n' "$created_ms"
+	} > "$tmp"
+	mv "$tmp" "$MARKER"
 }
 
 now_ms()
@@ -146,6 +163,26 @@ if [ "$REQUEST_DEBOUNCE_MS" -gt 0 ] && request_was_recent; then
 	trace_restore "exit.debounced" "debounce_ms=$REQUEST_DEBOUNCE_MS"
 	exit 0
 fi
+
+trace_restore "runtime_restore.start"
+RUNTIME_RESTORE=$("$ROOT/scripts/newmux-runtime.py" restore-latest \
+	--socket-name "$SOCKET_NAME" \
+	--socket-path "$EXPLICIT_SOCKET_PATH" \
+	--primary-session "$PRIMARY_SESSION" \
+	--json 2>/dev/null || true)
+trace_restore "runtime_restore.end" "result=${RUNTIME_RESTORE:-}"
+RUNTIME_WINDOW=$(printf '%s\n' "$RUNTIME_RESTORE" |
+	sed -n 's/.*"restored": true.*"window": "\([^"]*\)".*/\1/p')
+if [ -n "$RUNTIME_WINDOW" ]; then
+	now_ms > "$REQUEST_STAMP"
+	trace_restore "runtime_restore.marker.start" "window=$RUNTIME_WINDOW"
+	write_window_marker "$RUNTIME_WINDOW"
+	trace_restore "runtime_restore.marker.end" "window=$RUNTIME_WINDOW"
+	open_ghostty_surface
+	trace_restore "exit.after_runtime_open" "window=$RUNTIME_WINDOW"
+	exit 0
+fi
+
 trace_restore "reserve_latest.start"
 RESERVED=$(newmux_cmd newmux-reserve-latest-closed -P 2>/dev/null || true)
 trace_restore "reserve_latest.end" "result=${RESERVED:-}"

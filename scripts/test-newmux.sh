@@ -90,9 +90,9 @@ fi
 
 RESTORE_BIND=$("$NEWMUX" -L "$SOCKET_NAME" list-keys -T prefix | grep 'prefix T ')
 case "$RESTORE_BIND" in
-	*"future reopen-latest-closed"*) ;;
+	*"newmux-reopen-latest-closed"*) ;;
 	*)
-		echo "restore placeholder binding missing: $RESTORE_BIND" >&2
+		echo "restore binding missing: $RESTORE_BIND" >&2
 		exit 1
 		;;
 esac

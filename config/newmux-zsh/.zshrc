@@ -22,4 +22,17 @@ if [[ -o interactive ]]; then
 	newmux_disable_rprompt
 	autoload -Uz add-zsh-hook
 	add-zsh-hook precmd newmux_disable_rprompt
+
+	newmux_mark_command_entered() {
+		[[ -n ${TMUX_PANE:-} ]] || return 0
+		local socket_path=""
+		if [[ -n ${TMUX:-} ]]; then
+			socket_path="${TMUX%%,*}"
+		fi
+		command python3 /Users/williamxu/Desktop/Projects/newmux/scripts/newmux-runtime.py command \
+			--socket-path "$socket_path" \
+			--pane "$TMUX_PANE" \
+			--shell-command "$1" >/dev/null 2>&1 &!
+	}
+	add-zsh-hook preexec newmux_mark_command_entered
 fi

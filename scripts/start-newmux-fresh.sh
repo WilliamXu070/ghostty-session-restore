@@ -10,7 +10,8 @@ ATTACH_UNREPRESENTED=${NEWMUX_ATTACH_UNREPRESENTED:-0}
 RESTORE_MARKER="${TMPDIR:-/tmp}/newmux-restore-tab-$(id -u)-$SOCKET_NAME"
 RESTORE_QUEUE_DIR="$RESTORE_MARKER.queue"
 RESTORE_CLAIM_DIR="$RESTORE_MARKER.claim"
-RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-5}
+RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-30}
+NEWMUX_TAB_MARKER_WAIT_MS=${NEWMUX_TAB_MARKER_WAIT_MS:-500}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
 
 trace_now_ms()
@@ -104,6 +105,17 @@ restore_marker_is_stale()
 	esac
 	now=$(date +%s)
 	[ $((now - created_at)) -gt "$RESTORE_MARKER_TTL_SECONDS" ]
+}
+
+wait_for_restore_marker()
+{
+	waited_ms=0
+	while [ "$waited_ms" -lt "$NEWMUX_TAB_MARKER_WAIT_MS" ]; do
+		[ -f "$RESTORE_MARKER" ] && return 0
+		sleep 0.02
+		waited_ms=$((waited_ms + 20))
+	done
+	return 1
 }
 
 restore_field()
@@ -228,9 +240,14 @@ claim_restore_window_id()
 	fi
 
 	if [ ! -f "$RESTORE_MARKER" ]; then
-		trace_restore "claim_marker.missing"
-		finish_restore_claim
-		return 1
+		trace_restore "claim_marker.wait.start" \
+			"wait_ms=$NEWMUX_TAB_MARKER_WAIT_MS"
+		if ! wait_for_restore_marker; then
+			trace_restore "claim_marker.missing"
+			finish_restore_claim
+			return 1
+		fi
+		trace_restore "claim_marker.wait.end"
 	fi
 	if restore_marker_is_stale; then
 		rm -f "$RESTORE_MARKER"
@@ -393,20 +410,8 @@ trace_restore "clear_detached_recovery_state.end"
 
 if [ "${1:-}" != kill-only ] &&
 	newmux has-session -t "$PRIMARY_SESSION" >/dev/null 2>&1; then
-	trace_restore "detached_existing_session"
-	cleanup_unattached_native_tab_sessions
-
-	if [ "$ATTACH_UNREPRESENTED" != 0 ]; then
-		trace_restore "detached_attach_unrepresented.start"
-		TAB_WINDOW=$(find_unrepresented_window | head -1)
-		trace_restore "detached_attach_unrepresented.end" \
-			"window_id=$TAB_WINDOW"
-		if [ -n "$TAB_WINDOW" ]; then
-			attach_native_tab_to_window "$TAB_WINDOW"
-		fi
-	fi
-	trace_restore "exec_existing_primary"
-	exec "$ROOT/scripts/run-newmux.sh" new-session -A -s "$PRIMARY_SESSION"
+	trace_restore "detached_existing_session.clear_for_fresh_start"
+	newmux kill-server >/dev/null 2>&1 || true
 fi
 
 trace_restore "kill_stale_processes.start"

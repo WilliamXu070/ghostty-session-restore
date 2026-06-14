@@ -252,6 +252,14 @@ class TerminalWindow: NSWindow {
     }
 
     override func addTitlebarAccessoryViewController(_ childViewController: NSTitlebarAccessoryViewController) {
+        if NewmuxUIFlag.enabled && isTabBar(childViewController) {
+            childViewController.identifier = Self.tabBarIdentifier
+            childViewController.view.isHidden = true
+            childViewController.view.frame.size.height = 0
+            super.addTitlebarAccessoryViewController(childViewController)
+            return
+        }
+
         super.addTitlebarAccessoryViewController(childViewController)
 
         // Tab bar is attached as a titlebar accessory view controller (layout bottom). We

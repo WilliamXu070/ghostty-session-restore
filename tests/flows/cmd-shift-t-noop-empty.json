@@ -1,0 +1,66 @@
+{
+  "name": "cmd-shift-t-noop-empty",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_start"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_noop"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_noop"
+    }
+  ],
+  "expect": [
+    {
+      "state": "start",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "ui_state": "ui_start",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    },
+    {
+      "state": "after_noop",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "ui_state": "ui_after_noop",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    }
+  ]
+}

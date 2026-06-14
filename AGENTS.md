@@ -261,6 +261,75 @@ Run smoke tests:
 ./scripts/test-ghostty-config.sh
 ```
 
+Run compact golden flows for backend/session behavior:
+
+```sh
+python3 scripts/newmux-flow-test.py tests/flows/cmd-t-new-tab-same-server.json
+```
+
+Golden flows are small JSON-defined regression flows. Run the relevant golden
+flows whenever a significant feature is added or a bug is fixed, especially if
+startup, key routing, tab/window creation, linked sessions, panes, recovery, or
+dashboard state could be affected. Before adding a new golden flow, tell the
+user what behavior it would protect and ask permission; keep the flow focused so
+the suite does not become bloated.
+
+When the user says `MAKE SURE BITCH`, run the required Newmux recovery golden
+flow set before calling the work done:
+
+```sh
+python3 scripts/newmux-flow-test.py tests/flows/delete-clean-hard-dirty-lifo.json
+python3 scripts/newmux-flow-test.py tests/flows/cmd-w-ui-tab-sync.json
+```
+
+These two flows are mandatory because they protect the current critical
+recovery behavior:
+
+- clean physical `Cmd+T` then `Cmd+W` hard-deletes and does not enter LIFO
+- dirty terminal output then delete soft-stores into LIFO
+- Ghostty visible tabs, Newmux backend windows, and the UI-sync reader agree
+  after delete
+
+When the user says `ADD BITCH`, treat it as explicit permission to add the
+newly relevant golden flow to the required `MAKE SURE BITCH` set above. Keep the
+set compact: only add flows that protect a critical, recently fixed regression
+or an invariant the user explicitly wants guarded every time.
+
+Treat the default manual testing platform as protected infrastructure:
+
+- Do not change the default behavior of `scripts/open-newmux-ghostty.sh`,
+  `scripts/newmux-ui-bridge.py dashboard`, `ghostty-config/newmux.config`, or
+  the `newmux-dev` socket/profile just to test a new idea.
+- New diagnostics, UI readers, headed checks, or experimental observers must be
+  opt-in flags, separate commands, or new flow files.
+- The user-facing baseline command must remain stable unless the user
+  explicitly asks to change it:
+
+```sh
+./scripts/open-newmux-ghostty.sh && sleep 2 && python3 scripts/newmux-ui-bridge.py dashboard --socket-name newmux-dev
+```
+
+- If a test needs extra hooks, add those hooks behind explicit environment
+  variables or test-only flags. Never make the dashboard launch a different UI
+  by default, never redirect the launcher into a synthetic test bed, and never
+  replace the baseline Ghostty/Newmux path with a new experiment.
+
+UI sync tests should compare independent views of the same state, not only the
+Newmux server. The backend source of truth is the `newmux-ui-bridge.py snapshot`
+data: visible workspaces, windows, panes, dirty state, and LIFO recovery stack.
+The frontend source of truth is the currently running Ghostty UI: native tab
+count, selected tab/window, and the Newmux visual rail/dashboard representation.
+A UI test is valid only when it proves the invariant:
+
+```text
+visible backend windows == visible Ghostty tabs == visible dashboard/rail items
+```
+
+Use the existing `newmux-dev` launcher path for these UI checks. Do not create a
+separate socket, profile, or synthetic UI test bed unless the user explicitly
+asks for isolation. UI tests should expose mismatches directly, for example:
+backend says a window was deleted but Ghostty still renders a stale tab.
+
 Expected test output includes:
 
 ```text
@@ -386,6 +455,23 @@ The current repository name, `newmux`, fits the early direction well.
 When working on this project, preserve the central promise:
 
 > Terminal work should be recoverable like browser tabs.
+
+When asked to make a plan, keep it concise. Focus on:
+
+- the main idea
+- the technical mechanism and why it works
+- the data sources, ownership boundaries, and state transitions
+- the invariants that prove correctness
+- the concrete files, hooks, APIs, or systems involved
+- the failure modes and the simplest way to detect them
+
+Do not answer planning requests with generic execution checklists, UI feature
+lists, or obvious implementation chores. For example, if the user asks how an
+observer should visualize state, explain the observer architecture: which source
+is authoritative, how backend and frontend state are normalized, how mismatches
+are classified, which hook is fastest or least flaky, and what evidence proves a
+stale UI. Avoid bloated planning, repeated product motivation, obvious filler,
+and long speculative branches unless the user explicitly asks for depth.
 
 Prefer small prototypes that validate recovery behavior over broad rewrites. The most important user story is not "build a better tmux." It is:
 

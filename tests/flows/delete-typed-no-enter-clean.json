@@ -1,0 +1,68 @@
+{
+  "name": "delete-typed-no-enter-clean",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "cmd_t",
+      "from": "start"
+    },
+    {
+      "do": "snapshot",
+      "as": "typed_tab_clean_baseline"
+    },
+    {
+      "do": "send_keys",
+      "from": "typed_tab_clean_baseline",
+      "target": "latest_window",
+      "keys": [
+        "printf 'typed-but-not-entered'"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "typed_tab"
+    },
+    {
+      "do": "cmd_w",
+      "from": "typed_tab",
+      "target": "latest_window"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_typed_delete"
+    }
+  ],
+  "expect": [
+    {
+      "state": "typed_tab",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "dirty_windows": 0,
+      "dirty_panes": 0,
+      "lifo": 0
+    },
+    {
+      "state": "after_typed_delete",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    }
+  ]
+}

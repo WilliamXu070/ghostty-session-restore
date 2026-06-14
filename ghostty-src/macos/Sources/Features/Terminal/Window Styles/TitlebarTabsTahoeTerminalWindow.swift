@@ -80,6 +80,14 @@ class TitlebarTabsTahoeTerminalWindow: TransparentTitlebarTerminalWindow, NSTool
             return
         }
 
+        if NewmuxUIFlag.enabled {
+            childViewController.identifier = Self.tabBarIdentifier
+            childViewController.view.isHidden = true
+            childViewController.view.frame.size.height = 0
+            super.addTitlebarAccessoryViewController(childViewController)
+            return
+        }
+
         // When an existing tab is being dragged in to another tab group,
         // system will also try to add tab bar to this window, so we want to reset observer,
         // to put tab bar where we want again

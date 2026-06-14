@@ -1,0 +1,149 @@
+{
+  "name": "cmd-shift-t-left-tab-position",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_start"
+    },
+    {
+      "do": "cmd_t",
+      "from": "start"
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_t"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_t"
+    },
+    {
+      "do": "rename_window",
+      "from": "start",
+      "target": "window_index:0",
+      "name": "left"
+    },
+    {
+      "do": "send_keys",
+      "from": "after_cmd_t",
+      "target": "window_index:0",
+      "keys": [
+        "printf 'left-dirty-marker'",
+        "Enter"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "dirty_left"
+    },
+    {
+      "do": "cmd_w",
+      "from": "dirty_left",
+      "target": "window_index:0"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_delete"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_delete"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_restore"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_restore"
+    }
+  ],
+  "expect": [
+    {
+      "ui_state": "ui_start",
+      "native_tabs": 1,
+      "rail_tabs": 1,
+      "active_native_tab_index": 0
+    },
+    {
+      "state": "after_cmd_t",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "dirty_windows": 0,
+      "dirty_panes": 0
+    },
+    {
+      "ui_state": "ui_after_cmd_t",
+      "native_tabs": 2,
+      "rail_tabs": 2
+    },
+    {
+      "state": "dirty_left",
+      "dirty_windows": 1,
+      "dirty_panes": 1
+    },
+    {
+      "state": "after_delete",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 1
+    },
+    {
+      "ui_state": "ui_after_delete",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    },
+    {
+      "state": "after_restore",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "lifo": 0,
+      "dirty_windows": 0,
+      "dirty_panes": 0
+    },
+    {
+      "ui_state": "ui_after_restore",
+      "native_tabs": 2,
+      "rail_tabs": 2,
+      "active_native_tab_index": 0
+    }
+  ]
+}
