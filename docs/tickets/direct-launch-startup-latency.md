@@ -132,3 +132,28 @@ evidence for this fix.
 ## Status
 
 Fixed and verified locally.
+
+## 2026-06-19 regression check
+
+The Newmux Ghostty profile had drifted back to `command = /bin/zsh` plus
+startup `input = raw:exec ...`, reintroducing the slow shell-startup path for
+new terminal surfaces. Restored the direct launcher:
+
+```ini
+command = direct:/Users/williamxu/Desktop/Projects/newmux/scripts/start-newmux-fresh.sh
+```
+
+Verification:
+
+- `./scripts/test-ghostty-config.sh` passed.
+- `testing/test-newmux-gf-direct-launch-no-login-wrapper.sh` passed with
+  `parent_cmd` pointing directly at the patched Ghostty app, not
+  `/usr/bin/login`.
+- `./scripts/test-newmux.sh` passed.
+
+Headless timing on a local Newmux socket remained fast:
+
+- New-tab request marker: about 160 ms.
+- Startup claim/attach: about 180 ms.
+- Clean delete: about 80 ms.
+- Dirty soft delete: about 150 ms.
