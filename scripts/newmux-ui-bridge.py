@@ -48,9 +48,18 @@ def _prompt_only_after_empty_baseline(baseline: dict[str, Any] | None, line_coun
 
 
 class Newmux:
-    def __init__(self, socket_name: str, socket_path: str | None = None):
+    def __init__(
+        self,
+        socket_name: str,
+        socket_path: str | None = None,
+        *,
+        deep_snapshot: bool = False,
+        all_sessions: bool = False,
+    ):
         self.socket_name = socket_name
         self.socket_path = socket_path or os.environ.get("NEWMUX_SOCKET_PATH") or self._latest_socket_path()
+        self.deep_snapshot = deep_snapshot
+        self.all_sessions = all_sessions
 
     def _latest_socket_path(self) -> str | None:
         path_file = ROOT / ".local" / "newmux-ghostty" / "latest" / "socket-path"
@@ -147,7 +156,6 @@ class Newmux:
                 continue
             seen.add(pane_id)
             baseline = baselines.get(pane_id)
-            current_hash, line_count = self._pane_capture_hash(pane_id)
             command_state = commands.get(pane_id, {})
             command_count = int(command_state.get("command_count") or 0)
             dirty = command_count > 0
@@ -159,8 +167,10 @@ class Newmux:
             pane["dirty_reason"] = reason
             pane["command_count"] = command_count
             pane["last_command"] = command_state.get("last_command")
-            pane["capture_hash"] = current_hash
-            pane["capture_line_count"] = line_count
+            if self.deep_snapshot:
+                current_hash, line_count = self._pane_capture_hash(pane_id)
+                pane["capture_hash"] = current_hash
+                pane["capture_line_count"] = line_count
 
     def _revision(self, state: dict[str, Any]) -> str:
         stable = {
@@ -219,8 +229,10 @@ class Newmux:
                 "#{window_layout}",
             ]
         )
+        target = ["-a"] if self.all_sessions else ["-t", "newmux"]
+        active_windows = self._client_active_windows() if not self.all_sessions else {}
         windows = []
-        for row in self.rows("list-windows", "-a", "-F", fmt):
+        for row in self.rows("list-windows", *target, "-F", fmt):
             if len(row) < 9:
                 continue
             sid, sname, group, wid, idx, name, active, panes, layout = row[:9]
@@ -232,13 +244,26 @@ class Newmux:
                     "session_group": group or None,
                     "index": int(idx or "0"),
                     "name": name,
-                    "active": active == "1",
+                    "active": wid in active_windows if not self.all_sessions else active == "1",
+                    "active_views": sorted(active_windows.get(wid, [])),
                     "pane_count": int(panes or "0"),
                     "layout": layout,
                     "internal": sname == INTERNAL_SESSION,
                 }
             )
         return windows
+
+    def _client_active_windows(self) -> dict[str, set[str]]:
+        fmt = FIELD_SEP.join(["#{client_session}", "#{window_id}"])
+        active: dict[str, set[str]] = {}
+        for row in self.rows("list-clients", "-F", fmt):
+            if len(row) < 2:
+                continue
+            session_name, window_id = row[:2]
+            if not window_id:
+                continue
+            active.setdefault(window_id, set()).add(session_name)
+        return active
 
     def _panes(self) -> list[dict[str, Any]]:
         fmt = FIELD_SEP.join(
@@ -257,8 +282,19 @@ class Newmux:
                 "#{pane_height}",
             ]
         )
+        target = ["-a"] if self.all_sessions else ["-s", "-t", "newmux"]
+        primary_session_id = None
+        if not self.all_sessions:
+            primary_session_id = self.run(
+                "display-message",
+                "-p",
+                "-t",
+                "newmux:",
+                "#{session_id}",
+                check=False,
+            ).strip() or None
         panes = []
-        for row in self.rows("list-panes", "-a", "-F", fmt):
+        for row in self.rows("list-panes", *target, "-F", fmt):
             if len(row) < 12:
                 continue
             (
@@ -275,6 +311,9 @@ class Newmux:
                 width,
                 height,
             ) = row[:12]
+            if not self.all_sessions:
+                sid = primary_session_id or sid
+                sname = "newmux"
             panes.append(
                 {
                     "id": pid,
@@ -368,9 +407,19 @@ class BridgeServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, socket_path: str, newmux: Newmux, poll_interval: float):
+    def __init__(
+        self,
+        socket_path: str,
+        newmux: Newmux,
+        poll_interval: float,
+        *,
+        deep_snapshot: bool = False,
+        all_sessions: bool = False,
+    ):
         self.newmux = newmux
         self.poll_interval = poll_interval
+        self.deep_snapshot = deep_snapshot
+        self.all_sessions = all_sessions
         super().__init__(socket_path, BridgeHandler)
 
 
@@ -382,7 +431,22 @@ class BridgeHandler(socketserver.StreamRequestHandler):
             try:
                 request = json.loads(raw.decode())
                 if request.get("type") == "get_snapshot":
-                    self.write(self.server.newmux.snapshot())
+                    deep_snapshot = bool(request.get("deep_snapshot", self.server.deep_snapshot))
+                    all_sessions = bool(request.get("all_sessions", self.server.all_sessions))
+                    if (
+                        deep_snapshot == self.server.deep_snapshot
+                        and all_sessions == self.server.all_sessions
+                    ):
+                        self.write(self.server.newmux.snapshot())
+                    else:
+                        self.write(
+                            Newmux(
+                                self.server.newmux.socket_name,
+                                self.server.newmux.socket_path,
+                                deep_snapshot=deep_snapshot,
+                                all_sessions=all_sessions,
+                            ).snapshot()
+                        )
                 elif request.get("type") == "command":
                     result = self.server.newmux.command(request)
                     result["type"] = "command_result"
@@ -420,8 +484,15 @@ def serve(args: argparse.Namespace) -> int:
         os.unlink(socket_path)
     server = BridgeServer(
         socket_path,
-        Newmux(args.socket_name, args.socket_path),
+        Newmux(
+            args.socket_name,
+            args.socket_path,
+            deep_snapshot=args.deep_snapshot,
+            all_sessions=args.all_sessions,
+        ),
         args.poll_interval,
+        deep_snapshot=args.deep_snapshot,
+        all_sessions=args.all_sessions,
     )
     try:
         server.serve_forever()
@@ -452,7 +523,12 @@ def request(args: argparse.Namespace) -> int:
 def snapshot(args: argparse.Namespace) -> int:
     print(
         json.dumps(
-            Newmux(args.socket_name, args.socket_path).snapshot(),
+            Newmux(
+                args.socket_name,
+                args.socket_path,
+                deep_snapshot=args.deep_snapshot,
+                all_sessions=args.all_sessions,
+            ).snapshot(),
             indent=2,
             sort_keys=True,
         )
@@ -841,7 +917,12 @@ def _ui_sync_lines(
 
 
 def _plain_dashboard(args: argparse.Namespace) -> int:
-    state = Newmux(args.socket_name, args.socket_path).snapshot()
+    state = Newmux(
+        args.socket_name,
+        args.socket_path,
+        deep_snapshot=args.deep_snapshot,
+        all_sessions=args.show_internal,
+    ).snapshot()
     lines = _dashboard_lines(state, show_internal=args.show_internal, new_window_ids=set())
     if args.ui_sync:
         lines.extend(
@@ -868,7 +949,12 @@ def _curses_dashboard(stdscr: Any, args: argparse.Namespace) -> None:
         pass
     stdscr.nodelay(True)
     stdscr.keypad(True)
-    newmux = Newmux(args.socket_name, args.socket_path)
+    newmux = Newmux(
+        args.socket_name,
+        args.socket_path,
+        deep_snapshot=args.deep_snapshot,
+        all_sessions=args.show_internal,
+    )
     known_window_ids: set[str] = set()
     highlighted_until: dict[str, float] = {}
     last_error = ""
@@ -1023,7 +1109,9 @@ def main(argv: list[str]) -> int:
     serve_parser.add_argument("--socket-name", default="newmux-dev")
     serve_parser.add_argument("--socket-path")
     serve_parser.add_argument("--bridge-socket", required=True)
-    serve_parser.add_argument("--poll-interval", type=float, default=0.2)
+    serve_parser.add_argument("--poll-interval", type=float, default=0.5)
+    serve_parser.add_argument("--deep-snapshot", action="store_true")
+    serve_parser.add_argument("--all-sessions", action="store_true")
     serve_parser.set_defaults(func=serve)
 
     request_parser = subparsers.add_parser("request")
@@ -1035,6 +1123,8 @@ def main(argv: list[str]) -> int:
     snapshot_parser = subparsers.add_parser("snapshot")
     snapshot_parser.add_argument("--socket-name", default="newmux-dev")
     snapshot_parser.add_argument("--socket-path")
+    snapshot_parser.add_argument("--deep-snapshot", action="store_true")
+    snapshot_parser.add_argument("--all-sessions", action="store_true")
     snapshot_parser.set_defaults(func=snapshot)
 
     key_event_parser = subparsers.add_parser("key-event")
@@ -1051,12 +1141,13 @@ def main(argv: list[str]) -> int:
     dashboard_parser = subparsers.add_parser("dashboard")
     dashboard_parser.add_argument("--socket-name", default="newmux-dev")
     dashboard_parser.add_argument("--socket-path")
-    dashboard_parser.add_argument("--poll-interval", type=float, default=0.2)
+    dashboard_parser.add_argument("--poll-interval", type=float, default=0.5)
     dashboard_parser.add_argument("--show-internal", action="store_true")
     dashboard_parser.add_argument("--once", action="store_true")
     dashboard_parser.add_argument("--terminal", action="store_true")
     dashboard_parser.add_argument("--gui", action="store_true")
     dashboard_parser.add_argument("--ui-sync", action="store_true")
+    dashboard_parser.add_argument("--deep-snapshot", action="store_true")
     dashboard_parser.add_argument("--status-file", type=Path)
     dashboard_parser.set_defaults(func=dashboard)
 

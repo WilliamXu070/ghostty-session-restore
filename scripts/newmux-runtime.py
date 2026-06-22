@@ -93,9 +93,10 @@ def read_baselines(run_dir: Path) -> dict[str, Any]:
 
 
 def write_baselines(run_dir: Path, baselines: dict[str, Any]) -> None:
-    tmp = baseline_path(run_dir).with_suffix(".tmp")
+    target = baseline_path(run_dir)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
-    tmp.replace(baseline_path(run_dir))
+    tmp.replace(target)
 
 
 def read_command_state(run_dir: Path) -> dict[str, Any]:
@@ -106,9 +107,10 @@ def read_command_state(run_dir: Path) -> dict[str, Any]:
 
 
 def write_command_state(run_dir: Path, state: dict[str, Any]) -> None:
-    tmp = command_state_path(run_dir).with_suffix(".tmp")
+    target = command_state_path(run_dir)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-    tmp.replace(command_state_path(run_dir))
+    tmp.replace(target)
 
 
 def read_restored_sequences(run_dir: Path) -> set[int]:
@@ -120,9 +122,10 @@ def read_restored_sequences(run_dir: Path) -> set[int]:
 
 
 def write_restored_sequences(run_dir: Path, restored: set[int]) -> None:
-    tmp = restored_stack_path(run_dir).with_suffix(".tmp")
+    target = restored_stack_path(run_dir)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(sorted(restored), indent=2) + "\n")
-    tmp.replace(restored_stack_path(run_dir))
+    tmp.replace(target)
 
 
 def read_order_ledger(run_dir: Path) -> dict[str, Any]:
@@ -134,9 +137,10 @@ def read_order_ledger(run_dir: Path) -> dict[str, Any]:
 
 def write_order_ledger(run_dir: Path, ledger: dict[str, Any]) -> None:
     ledger["updated_at"] = time.time()
-    tmp = order_ledger_path(run_dir).with_suffix(".tmp")
+    target = order_ledger_path(run_dir)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
-    tmp.replace(order_ledger_path(run_dir))
+    tmp.replace(target)
 
 
 def read_lifo_items(run_dir: Path, *, include_restored: bool = False) -> list[dict[str, Any]]:
@@ -493,16 +497,25 @@ def mark_panes(args: argparse.Namespace) -> int:
     baselines = read_baselines(run_dir)
     commands = read_command_state(run_dir)
     rows = pane_rows(args.socket_path, socket_name(args.socket_path, args.socket_name), args.target)
+    capture_baseline = os.environ.get("NEWMUX_MARK_CAPTURE_BASELINE") not in (None, "", "0")
     for row in rows:
-        capture = capture_pane(args.socket_path, socket_name(args.socket_path, args.socket_name), row["pane"])
+        capture = (
+            capture_pane(args.socket_path, socket_name(args.socket_path, args.socket_name), row["pane"])
+            if capture_baseline
+            else ""
+        )
         baselines[row["pane"]] = {
             **row,
             "hash": hash_text(capture),
+            "capture_skipped": not capture_baseline,
             "marked_at": time.time(),
         }
+        previous = commands.get(row["pane"], {})
+        previous_count = int(previous.get("command_count") or 0)
         commands[row["pane"]] = {
-            "command_count": 0,
-            "dirty": False,
+            **previous,
+            "command_count": previous_count,
+            "dirty": previous_count > 0,
             "marked_at": time.time(),
         }
         runtime_event(run_dir, "pane.baseline", **baselines[row["pane"]])

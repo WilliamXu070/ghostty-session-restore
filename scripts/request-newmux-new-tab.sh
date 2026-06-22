@@ -17,9 +17,10 @@ fi
 EXPLICIT_SOCKET_PATH=${NEWMUX_SOCKET_PATH:-$SOCKET_PATH}
 MARKER="${TMPDIR:-/tmp}/newmux-restore-tab-$(id -u)-$SOCKET_NAME"
 REQUEST_LOCK_DIR="$MARKER.new-tab-lock"
-REQUEST_DEBOUNCE_MS=${NEWMUX_NEW_TAB_REQUEST_DEBOUNCE_MS:-150}
+REQUEST_DEBOUNCE_MS=${NEWMUX_NEW_TAB_REQUEST_DEBOUNCE_MS:-0}
 REQUEST_STAMP="$MARKER.new-tab-requested"
 OPEN_TAB_DELAY_SECONDS=${NEWMUX_NEW_TAB_OPEN_DELAY_SECONDS:-0}
+RECORD_KEY_EVENTS=${NEWMUX_RECORD_KEY_EVENTS:-0}
 TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
 
 newmux_cmd()
@@ -134,13 +135,13 @@ else
 fi
 
 trace_new_tab "window.created" "window_id=$window_id" "cwd=${cwd:-}"
+write_window_marker "$window_id"
+trace_new_tab "marker.written" "window_id=$window_id" "marker=$MARKER"
 "$ROOT/scripts/newmux-runtime.py" mark \
 	--socket-name "$SOCKET_NAME" \
 	--socket-path "$EXPLICIT_SOCKET_PATH" \
-	--target "$window_id" >/dev/null 2>&1 || true
-write_window_marker "$window_id"
-trace_new_tab "marker.written" "window_id=$window_id" "marker=$MARKER"
-if [ -n "$TARGET_PANE" ]; then
+	--target "$window_id" >/dev/null 2>&1 &
+if [ -n "$TARGET_PANE" ] && [ "$RECORD_KEY_EVENTS" != 0 ]; then
 	"$ROOT/scripts/newmux-ui-bridge.py" key-event \
 		--key cmd+t \
 		--socket-path "$EXPLICIT_SOCKET_PATH" \

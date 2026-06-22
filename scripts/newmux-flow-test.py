@@ -43,6 +43,7 @@ class FlowRunner:
         self.states: dict[str, dict[str, Any]] = {}
         self.ui_states: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self.ghostty_pid: int | None = None
         self.env = os.environ.copy()
         self.env["NEWMUX_RESTORE_TRACE_FILE"] = str(self.trace_path)
 
@@ -111,8 +112,22 @@ class FlowRunner:
         self.run_cmd([str(ROOT / "scripts" / "open-newmux-ghostty.sh")], env_extra=env_extra)
         self.wait(float(setup.get("wait", 2)))
         self.wait_for_ready(float(setup.get("ready_timeout", 8)))
+        self.ghostty_pid = self.find_test_ghostty_pid()
+        self.event("setup.ghostty", pid=self.ghostty_pid)
         self.mark_runtime("newmux")
         self.event("setup.end", setup=setup_type, socket_path=self.socket_path())
+
+    def find_test_ghostty_pid(self) -> int:
+        pattern = r"Ghostty[.]app/Contents/MacOS/ghostty .*ghostty-config/newmux[.]config"
+        proc = self.run_cmd(["pgrep", "-f", pattern], check=False)
+        pids = [
+            int(line)
+            for line in proc.stdout.splitlines()
+            if line.strip().isdigit()
+        ]
+        if not pids:
+            raise FlowFailure("could not find the Ghostty process launched for this flow")
+        return max(pids)
 
     def status_path(self) -> Path:
         try:
@@ -140,12 +155,27 @@ class FlowRunner:
                     "snapshot",
                     "--socket-name",
                     self.flow.get("socket_name", "newmux-dev"),
+                    "--socket-path",
+                    self.socket_path(),
                 ],
                 check=False,
             )
             if proc.returncode == 0:
-                self.event("ready.ok")
-                return
+                try:
+                    state = json.loads(proc.stdout)
+                except json.JSONDecodeError:
+                    state = {}
+                attached = sum(
+                    int(session.get("attached_clients") or 0)
+                    for session in state.get("sessions", [])
+                    if not session.get("internal")
+                )
+                if attached > 0:
+                    self.event("ready.ok", attached_clients=attached)
+                    return
+                last_error = "server up but no attached Ghostty client yet"
+                time.sleep(0.25)
+                continue
             last_error = (proc.stderr or proc.stdout).strip()
             time.sleep(0.25)
         raise FlowFailure(f"Newmux did not become ready within {timeout}s: {last_error}")
@@ -158,6 +188,8 @@ class FlowRunner:
                 "snapshot",
                 "--socket-name",
                 self.flow.get("socket_name", "newmux-dev"),
+                "--socket-path",
+                self.socket_path(),
             ]
         )
         snapshot = json.loads(proc.stdout)
@@ -332,7 +364,10 @@ class FlowRunner:
                 if current is None or pane["index"] < current["index"]:
                     unique[pane["window_id"]] = pane
             if unique:
-                return sorted(unique.values(), key=lambda pane: pane["window_index"])[-1]["id"]
+                return sorted(
+                    unique.values(),
+                    key=lambda pane: int(str(pane["window_id"]).lstrip("@") or "0"),
+                )[-1]["id"]
         primary = [
             pane for pane in state["panes"]
             if pane.get("session_name") == "newmux" and pane.get("active")
@@ -459,9 +494,12 @@ class FlowRunner:
             [
                 "osascript",
                 "-e",
-                'tell application "Ghostty" to activate',
+                (
+                    'tell application "System Events" to set frontmost of '
+                    f'(first process whose unix id is {self.ghostty_pid}) to true'
+                ),
                 "-e",
-                'tell application "System Events" to tell process "Ghostty" to set frontmost to true',
+                "delay 0.15",
                 "-e",
                 f'tell application "System Events" to key code {key_codes[key]} using {{{mods}}}',
             ],

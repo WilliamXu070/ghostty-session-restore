@@ -2,6 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 NEWMUX="$ROOT/bin/newmux"
 CONF="$ROOT/config/newmux-dev.tmux.conf"
 SOCKET_NAME=${NEWMUX_SOCKET:-newmux-dev}

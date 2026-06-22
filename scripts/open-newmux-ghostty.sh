@@ -16,17 +16,40 @@ fi
 NEWMUX_SOCKET=${NEWMUX_SOCKET:-newmux-dev}
 NEWMUX_SOCKET_PATH=${NEWMUX_SOCKET_PATH_OVERRIDE:-${NEWMUX_SOCKET_PATH:-$ROOT/.local/nm-sock/$NEWMUX_SOCKET.sock}}
 
-pgrep -f 'ghostty.*ghostty-config/newmux[.]config' 2>/dev/null |
-	while IFS= read -r OLD_GHOSTTY_PID; do
-		[ -n "$OLD_GHOSTTY_PID" ] || continue
-		kill "$OLD_GHOSTTY_PID" >/dev/null 2>&1 || true
+GHOSTTY_PROCESS_PATTERN='/Applications/Ghostty[.]app/Contents/MacOS/ghostty|/newmux/ghostty-macos-build/.*/Ghostty[.]app/Contents/MacOS/ghostty|ghostty.*ghostty-config/newmux[.]config'
+STARTER_PROCESS_PATTERN="$ROOT/scripts/start-newmux-fresh[.]sh"
+NEWMUX_PROCESS_PATTERN="$ROOT/bin/newmux .*config/newmux-dev[.]tmux[.]conf"
+
+kill_matching_processes()
+{
+	pattern=$1
+	pgrep -f "$pattern" 2>/dev/null |
+		while IFS= read -r pid; do
+			[ -n "$pid" ] || continue
+			[ "$pid" != "$$" ] || continue
+			kill "$pid" >/dev/null 2>&1 || true
+		done
+}
+
+wait_for_no_matching_processes()
+{
+	pattern=$1
+	waited_ms=0
+	while [ "$waited_ms" -lt 2000 ]; do
+		if ! pgrep -f "$pattern" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.05
+		waited_ms=$((waited_ms + 50))
 	done
-pgrep -f "$ROOT/bin/newmux .*config/newmux-dev[.]tmux[.]conf" 2>/dev/null |
-	while IFS= read -r OLD_NEWMUX_PID; do
-		[ -n "$OLD_NEWMUX_PID" ] || continue
-		kill "$OLD_NEWMUX_PID" >/dev/null 2>&1 || true
-	done
-sleep 0.2
+	return 1
+}
+
+kill_matching_processes "$GHOSTTY_PROCESS_PATTERN"
+kill_matching_processes "$STARTER_PROCESS_PATTERN"
+kill_matching_processes "$NEWMUX_PROCESS_PATTERN"
+wait_for_no_matching_processes "$GHOSTTY_PROCESS_PATTERN" || true
+wait_for_no_matching_processes "$STARTER_PROCESS_PATTERN" || true
 
 if [ -f "$BRIDGE_PID" ]; then
 	OLD_BRIDGE_PID=$(cat "$BRIDGE_PID" 2>/dev/null || true)
@@ -69,11 +92,11 @@ echo "$!" > "$BRIDGE_PID"
 CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.cache"}
 PATCHED_GHOSTTY_APP=${NEWMUX_GHOSTTY_APP:-"$CACHE_HOME/newmux/ghostty-macos-build/Debug/Ghostty.app"}
 USE_PATCHED_GHOSTTY=${NEWMUX_USE_PATCHED_GHOSTTY:-1}
-GHOSTTY_LAUNCH_PATH=${NEWMUX_GHOSTTY_LAUNCH_PATH:-"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+GHOSTTY_LAUNCH_PATH=${NEWMUX_GHOSTTY_LAUNCH_PATH:-"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
 
 if [ "$(uname)" = Darwin ] && [ -d "$PATCHED_GHOSTTY_APP" ] && \
 	{ [ "$USE_PATCHED_GHOSTTY" = 1 ] || [ -n "${NEWMUX_GHOSTTY_APP:-}" ]; }; then
-	if [ "${NEWMUX_GHOSTTY_BACKGROUND:-0}" = 1 ]; then
+	if [ "${NEWMUX_GHOSTTY_USE_OPEN:-0}" != 1 ]; then
 		(
 			exec env XDG_CONFIG_HOME="$XDG_HOME" \
 				PATH="$GHOSTTY_LAUNCH_PATH" \
@@ -105,10 +128,15 @@ if [ "$(uname)" = Darwin ] && [ -d "$PATCHED_GHOSTTY_APP" ] && \
 		--env "NEWMUX_GHOSTTY_SKIP_LOGIN=1" \
 		-na "$PATCHED_GHOSTTY_APP" \
 		--args --config-file="$ROOT/ghostty-config/newmux.config"
+elif [ "$(uname)" = Darwin ] && [ "$USE_PATCHED_GHOSTTY" = 1 ]; then
+	echo "patched Ghostty app not found: $PATCHED_GHOSTTY_APP" >&2
+	echo "run ./scripts/build-ghostty.sh or set NEWMUX_GHOSTTY_APP" >&2
+	exit 1
 elif [ "$(uname)" = Darwin ] && [ -d /Applications/Ghostty.app ]; then
 	if [ "${NEWMUX_GHOSTTY_BACKGROUND:-0}" = 1 ]; then
 			(
 				exec env XDG_CONFIG_HOME="$XDG_HOME" \
+				PATH="$GHOSTTY_LAUNCH_PATH" \
 					NEWMUX_USER_ZSHRC_SOURCED="${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 				NEWMUX_SOCKET="$NEWMUX_SOCKET" \
 				NEWMUX_SOCKET_PATH="$NEWMUX_SOCKET_PATH" \
@@ -150,6 +178,7 @@ else
 fi
 
 exec env XDG_CONFIG_HOME="$XDG_HOME" \
+	PATH="$GHOSTTY_LAUNCH_PATH" \
 	NEWMUX_USER_ZSHRC_SOURCED="${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 	NEWMUX_SOCKET="$NEWMUX_SOCKET" \
 	NEWMUX_SOCKET_PATH="$NEWMUX_SOCKET_PATH" \

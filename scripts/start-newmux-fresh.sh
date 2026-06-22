@@ -2,6 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 CONF="$ROOT/config/newmux-dev.tmux.conf"
 SOCKET_NAME=${NEWMUX_SOCKET:-newmux-dev}
 SOCKET_PATH=${NEWMUX_SOCKET_PATH:-}
@@ -11,7 +12,7 @@ RESTORE_MARKER="${TMPDIR:-/tmp}/newmux-restore-tab-$(id -u)-$SOCKET_NAME"
 RESTORE_QUEUE_DIR="$RESTORE_MARKER.queue"
 RESTORE_CLAIM_DIR="$RESTORE_MARKER.claim"
 RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-30}
-NEWMUX_TAB_MARKER_WAIT_MS=${NEWMUX_TAB_MARKER_WAIT_MS:-500}
+NEWMUX_TAB_MARKER_WAIT_MS=${NEWMUX_TAB_MARKER_WAIT_MS:-150}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
 
 trace_now_ms()
@@ -363,10 +364,6 @@ fi
 
 if [ "${1:-}" != kill-only ] && has_attached_clients; then
 	trace_restore "attached_clients.true"
-	trace_restore "cleanup_unattached_tabs.start"
-	cleanup_unattached_native_tab_sessions
-	trace_restore "cleanup_unattached_tabs.end"
-
 	trace_restore "claim_restore.start"
 	if TAB_WINDOW=$(claim_restore_window_id); then
 		trace_restore "claim_restore.ok" "window_id=$TAB_WINDOW"
@@ -384,6 +381,10 @@ if [ "${1:-}" != kill-only ] && has_attached_clients; then
 			exit 0
 		fi
 	fi
+
+	trace_restore "cleanup_unattached_tabs.start"
+	cleanup_unattached_native_tab_sessions
+	trace_restore "cleanup_unattached_tabs.end"
 
 	if [ "$ATTACH_UNREPRESENTED" != 0 ]; then
 		trace_restore "attach_unrepresented.start"
