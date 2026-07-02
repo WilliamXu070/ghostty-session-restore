@@ -399,6 +399,11 @@ extension Ghostty.Notification {
 
     /// New tab. Has base surface config requested in userinfo.
     static let ghosttyNewTab = Notification.Name("com.mitchellh.ghostty.newTab")
+    static let NewmuxTabInsertAtKey = "com.mitchellh.ghostty.newmuxTab.insertAt"
+    static let NewmuxTabEnvironmentKey = "com.mitchellh.ghostty.newmuxTab.environment"
+
+    /// Newmux restore tab hook. Backend integration is owned separately.
+    static let ghosttyNewmuxRestoreTab = Notification.Name("com.mitchellh.ghostty.newmuxRestoreTab")
 
     /// New window. Has base surface config requested in userinfo.
     static let ghosttyNewWindow = Notification.Name("com.mitchellh.ghostty.newWindow")

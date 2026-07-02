@@ -723,8 +723,18 @@ class AppDelegate: NSObject,
 
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
+        let insertAt = notification.userInfo?[Ghostty.Notification.NewmuxTabInsertAtKey] as? Int
+        let extraEnvironment = (
+            notification.userInfo?[Ghostty.Notification.NewmuxTabEnvironmentKey] as? [String: String]
+        ) ?? [:]
 
-        _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        _ = TerminalController.newTab(
+            ghostty,
+            from: window,
+            withBaseConfig: config,
+            insertAt: insertAt,
+            extraEnvironment: extraEnvironment
+        )
     }
 
     private func setDockBadge() {
