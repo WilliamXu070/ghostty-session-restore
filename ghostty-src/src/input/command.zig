@@ -716,6 +716,9 @@ fn actionCommands(action: Action.Key) []const Command {
         .previous_tab,
         .next_tab,
         .last_tab,
+        .newmux_new_tab,
+        .newmux_close_tab,
+        .newmux_restore_tab,
         => comptime &.{},
 
         // No commands for obvious reasons

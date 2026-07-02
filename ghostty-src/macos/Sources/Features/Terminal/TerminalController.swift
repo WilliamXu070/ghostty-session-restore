@@ -58,6 +58,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
 
+    /// Newmux backend window represented by this native tab, when launched
+    /// through the Newmux-native tab actions.
+    private(set) var newmuxWindowId: String?
+
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
@@ -66,6 +70,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
          parent: NSWindow? = nil
     ) {
+        self.newmuxWindowId = base?.environmentVariables["NEWMUX_ATTACH_WINDOW"]
+
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
         // time of writing this: it'd just restore to a shell in the same directory
@@ -407,13 +413,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newTab(
         _ ghostty: Ghostty.App,
         from parent: NSWindow? = nil,
-        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        insertAt: Int? = nil,
+        extraEnvironment: [String: String] = [:]
     ) -> TerminalController? {
+        var resolvedBaseConfig = baseConfig
+        if !extraEnvironment.isEmpty {
+            var config = resolvedBaseConfig ?? Ghostty.SurfaceConfiguration()
+            for (key, value) in extraEnvironment {
+                config.environmentVariables[key] = value
+            }
+            resolvedBaseConfig = config
+        }
+
         // Making sure that we're dealing with a TerminalController. If not,
         // then we just create a new window.
         guard let parent,
               let parentController = parent.windowController as? TerminalController else {
-            return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent)
+            return newWindow(ghostty, withBaseConfig: resolvedBaseConfig, withParent: parent)
         }
 
         // If our parent is in non-native fullscreen, then new tabs do not work.
@@ -430,7 +447,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let controller = TerminalController.init(ghostty, withBaseConfig: resolvedBaseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         guard let window = controller.window else { return controller }
 
@@ -452,20 +469,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // If we don't allow tabs then we create a new window instead.
         if window.tabbingMode != .disallowed {
-            // Add the window to the tab group and show it.
-            switch ghostty.config.windowNewTabPosition {
-            case "end":
-                // If we already have a tab group and we want the new tab to open at the end,
-                // then we use the last window in the tab group as the parent.
-                if let last = parent.tabGroup?.windows.last {
-                    last.addTabbedWindowSafely(window, ordered: .above)
-                } else {
-                    fallthrough
-                }
+            if let insertAt {
+                addTabbedWindow(window, to: parent, insertAt: insertAt)
+            } else {
+                // Add the window to the tab group and show it.
+                switch ghostty.config.windowNewTabPosition {
+                case "end":
+                    // If we already have a tab group and we want the new tab to open at the end,
+                    // then we use the last window in the tab group as the parent.
+                    if let last = parent.tabGroup?.windows.last {
+                        last.addTabbedWindowSafely(window, ordered: .above)
+                    } else {
+                        fallthrough
+                    }
 
-            case "current": fallthrough
-            default:
-                parent.addTabbedWindowSafely(window, ordered: .above)
+                case "current": fallthrough
+                default:
+                    parent.addTabbedWindowSafely(window, ordered: .above)
+                }
             }
         }
 
@@ -521,12 +542,32 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newTab(
                         ghostty,
                         from: parent,
-                        withBaseConfig: baseConfig)
+                        withBaseConfig: resolvedBaseConfig,
+                        insertAt: insertAt)
                 }
             }
         }
 
         return controller
+    }
+
+    private static func addTabbedWindow(
+        _ window: NSWindow,
+        to parent: NSWindow,
+        insertAt rawIndex: Int
+    ) {
+        guard let tabGroup = parent.tabGroup, !tabGroup.windows.isEmpty else {
+            parent.addTabbedWindowSafely(window, ordered: .above)
+            return
+        }
+
+        let windows = tabGroup.windows
+        let index = min(max(rawIndex, 0), windows.count)
+        if index < windows.count {
+            windows[index].addTabbedWindowSafely(window, ordered: .below)
+        } else {
+            windows.last?.addTabbedWindowSafely(window, ordered: .above)
+        }
     }
 
     // MARK: - Methods

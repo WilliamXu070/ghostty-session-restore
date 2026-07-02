@@ -559,6 +559,16 @@ pub const Action = union(enum) {
     /// Open a new tab.
     new_tab,
 
+    /// Newmux-native new tab entry point. This is separate from `new_tab`
+    /// so Newmux can attach backend metadata before native tab creation.
+    newmux_new_tab,
+
+    /// Newmux-native close tab entry point.
+    newmux_close_tab,
+
+    /// Newmux-native restore tab entry point.
+    newmux_restore_tab,
+
     /// Go to the previous tab.
     previous_tab,
 
@@ -1413,6 +1423,9 @@ pub const Action = union(enum) {
             // come from. For example `new_window` needs to be sourced to
             // a surface so inheritance can be done correctly.
             .new_tab,
+            .newmux_new_tab,
+            .newmux_close_tab,
+            .newmux_restore_tab,
             .previous_tab,
             .next_tab,
             .last_tab,

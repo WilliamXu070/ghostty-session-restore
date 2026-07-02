@@ -3544,8 +3544,7 @@ pub fn scrollCallback(
         // If we're scrolling up or down, then send a mouse event.
         if (self.isMouseReporting()) {
             if (y.delta != 0 or x.delta != 0)
-                self.newmuxMouseScrollReport(xoff, yoff, x.delta, y.delta,
-                    scroll_mods);
+                self.newmuxMouseScrollReport(xoff, yoff, x.delta, y.delta, scroll_mods);
 
             for (0..@abs(y.delta)) |_| {
                 const pos = try self.rt_surface.getCursorPos();
@@ -5283,6 +5282,24 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .newmux_new_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_new_tab,
+            apprt.action.NewmuxTab.default,
+        ),
+
+        .newmux_close_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_close_tab,
+            {},
+        ),
+
+        .newmux_restore_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_restore_tab,
+            {},
+        ),
+
         .close_tab => |v| return try self.rt_app.performAction(
             .{ .surface = self },
             .close_tab,
@@ -5650,6 +5667,7 @@ fn closingAction(action: input.Binding.Action) bool {
         .close_surface,
         .close_window,
         .close_tab,
+        .newmux_close_tab,
         => true,
 
         else => false,
