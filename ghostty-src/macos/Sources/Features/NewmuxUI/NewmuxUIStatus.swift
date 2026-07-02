@@ -1,5 +1,23 @@
 import Foundation
 
+struct NewmuxUITabStatus: Equatable {
+    let index: Int
+    let id: String
+    let title: String
+    let subtitle: String?
+    let active: Bool
+
+    var payload: [String: Any] {
+        [
+            "index": index,
+            "id": id,
+            "title": title,
+            "subtitle": subtitle ?? NSNull(),
+            "active": active,
+        ]
+    }
+}
+
 struct NewmuxUIStatus: Equatable {
     var uiEnabled: Bool = NewmuxUIFlag.enabled
     var statusEnabled: Bool = NewmuxUIFlag.statusEnabled
@@ -7,6 +25,7 @@ struct NewmuxUIStatus: Equatable {
     var nativeTabCount: Int = 0
     var railTabCount: Int = 0
     var activeNativeTabIndex: Int = -1
+    var nativeTabs: [NewmuxUITabStatus] = []
     var activeRailTabId: String?
     var bridgeConnected: Bool = false
     var lastSnapshotRevision: String?
@@ -30,6 +49,7 @@ struct NewmuxUIStatus: Equatable {
             "status_enabled": statusEnabled,
             "rail_expanded": railExpanded,
             "native_tab_count": nativeTabCount,
+            "native_tabs": nativeTabs.map(\.payload),
             "rail_tab_count": railTabCount,
             "active_native_tab_index": activeNativeTabIndex,
             "active_rail_tab_id": activeRailTabId ?? NSNull(),

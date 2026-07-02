@@ -212,7 +212,7 @@ Source and development layout:
 Generated development files:
 
 - `scripts/build-newmux.sh`: configures, builds, installs, copies the fork to `bin/newmux`, and ad-hoc signs the copied binary on macOS.
-- `scripts/build-ghostty.sh`: builds the patched Ghostty core and macOS app. The app bundle is written outside the Desktop-backed repo at `~/.cache/newmux/ghostty-macos-build/Debug/Ghostty.app` to avoid macOS File Provider extended attributes breaking codesign.
+- `scripts/build-ghostty.sh`: builds the patched Ghostty core and macOS app. The default build is Zig `ReleaseFast` plus Xcode `ReleaseLocal`, and the app bundle is written outside the Desktop-backed repo at `~/.cache/newmux/ghostty-macos-build/ReleaseLocal/Ghostty.app` to avoid macOS File Provider extended attributes breaking codesign and Debug build runtime slowness.
 - `scripts/run-newmux.sh`: runs `bin/newmux` with an isolated socket and the dev tmux config.
 - `scripts/start-newmux-fresh.sh`: kills stale `newmux-dev` processes/socket, then execs `run-newmux.sh`.
 - `scripts/test-newmux.sh`: headless smoke test for the binary, server, config load, and placeholder key hooks.
@@ -252,6 +252,14 @@ Build the patched Ghostty app:
 
 ```sh
 ./scripts/build-ghostty.sh
+```
+
+After changing Ghostty source or Ghostty-native Newmux actions, refresh the
+Spotlight/launched app so `/Applications/Ghostty.app` recognizes the patched
+actions used by `ghostty-config/newmux.config`:
+
+```sh
+./scripts/refresh-spotlight-ghostty.sh
 ```
 
 Run smoke tests:
@@ -356,6 +364,26 @@ Open a scrolling test profile with generated sample output:
 
 ```sh
 ./scripts/open-scroll-test-ghostty.sh
+
+### Codex Terminal Binary (External Client)
+
+Keep the terminal `codex` binary pointed at the local repo build when using forked Codex logic:
+
+```sh
+cd /Users/williamxu/Desktop/Projects/codex/codex-rs
+cargo build -p codex-cli --bin codex
+ln -sf /Users/williamxu/Desktop/Projects/codex/codex-rs/target/debug/codex /Users/williamxu/.local/bin/codex
+readlink /Users/williamxu/.local/bin/codex
+codex --version
+```
+
+Expected:
+- `~/.local/bin/codex` resolves to `.../codex-rs/target/debug/codex`
+- version prints `codex-cli 0.141.0`
+
+If you ever see the old target (for example `/private/tmp/codex-tui-target/debug/codex`), this section is the source of truth for re-pointing.
+
+Note: keep this command sequence explicit when you need "most up-to-date in terminal".
 ```
 
 The user's normal Ghostty config is also set up to include this repo's profile, so opening Ghostty from macOS Spotlight loads newmux automatically:

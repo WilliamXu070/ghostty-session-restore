@@ -20,6 +20,7 @@ REQUEST_STAMP="$MARKER.requested"
 REQUEST_DEBOUNCE_MS=${NEWMUX_RESTORE_REQUEST_DEBOUNCE_MS:-0}
 RESTORE_OPEN_TAB_DELAY_SECONDS=${NEWMUX_RESTORE_OPEN_TAB_DELAY_SECONDS:-0}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
+UI_STATUS_FILE=${NEWMUX_UI_STATUS_FILE:-$ROOT/.local/newmux-ghostty/latest/ui-status.json}
 
 newmux_cmd()
 {
@@ -52,14 +53,115 @@ trace_restore()
 	} >> "$RESTORE_TRACE_FILE" 2>/dev/null || true
 }
 
+status_number()
+{
+	field=$1
+	python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get(sys.argv[2], -1) or -1))' \
+		"$UI_STATUS_FILE" "$field" 2>/dev/null || printf '%s\n' -1
+}
+
+restored_window_position()
+{
+	window_id=$1
+	index=0
+	newmux_cmd list-windows -t "$PRIMARY_SESSION" -F '#{window_id}' \
+		2>/dev/null | while IFS= read -r current; do
+			if [ "$current" = "$window_id" ]; then
+				printf '%s\n' "$index"
+				exit 0
+			fi
+			index=$((index + 1))
+		done
+}
+
+wait_for_native_tab()
+{
+	before=$1
+	waited_ms=0
+	while [ "$waited_ms" -lt 2500 ]; do
+		count=$(status_number native_tab_count)
+		active=$(status_number active_native_tab_index)
+		if [ "$count" -gt "$before" ] && [ "$active" -ge 0 ]; then
+			return 0
+		fi
+		sleep 0.05
+		waited_ms=$((waited_ms + 50))
+	done
+	return 1
+}
+
+wait_for_active_native_tab()
+{
+	target=$1
+	waited_ms=0
+	while [ "$waited_ms" -lt 150 ]; do
+		active=$(status_number active_native_tab_index)
+		if [ "$active" = "$target" ]; then
+			return 0
+		fi
+		sleep 0.05
+		waited_ms=$((waited_ms + 50))
+	done
+	return 1
+}
+
+move_native_tab_to_position()
+{
+	target=$1
+	case "$target" in
+		''|*[!0-9]*)
+			return 0
+			;;
+	esac
+
+	wait_for_native_tab "$NATIVE_TAB_COUNT_BEFORE_OPEN" || true
+	active=$(status_number active_native_tab_index)
+	trace_restore "native_tab_reorder.start" \
+		"target=$target" "active=$active" \
+		"status_file=$UI_STATUS_FILE"
+
+	while [ "$active" -gt "$target" ]; do
+		osascript \
+			-e 'tell application "Ghostty" to activate' \
+			-e 'tell application "System Events" to key code 116 using {control down, shift down}' \
+			>/dev/null 2>&1 || break
+		sleep 0.08
+		next=$(status_number active_native_tab_index)
+		if [ "$next" -ge 0 ] && [ "$next" -lt "$active" ]; then
+			active=$next
+		else
+			active=$((active - 1))
+		fi
+	done
+
+	while [ "$active" -lt "$target" ]; do
+		osascript \
+			-e 'tell application "Ghostty" to activate' \
+			-e 'tell application "System Events" to key code 121 using {control down, shift down}' \
+			>/dev/null 2>&1 || break
+		sleep 0.08
+		next=$(status_number active_native_tab_index)
+		if [ "$next" -gt "$active" ]; then
+			active=$next
+		else
+			active=$((active + 1))
+		fi
+	done
+	wait_for_active_native_tab "$target" || true
+	trace_restore "native_tab_reorder.end" \
+		"target=$target" "active=$(status_number active_native_tab_index)"
+}
+
 open_ghostty_surface()
 {
+	target_position=${1:-}
 	if [ "$(uname)" != Darwin ] || [ "${NEWMUX_RESTORE_OPEN_TAB:-1}" = 0 ]; then
 		trace_restore "open_ghostty_surface.skip" \
 			"darwin=$(uname)" "open=${NEWMUX_RESTORE_OPEN_TAB:-1}"
 		return 0
 	fi
 
+	NATIVE_TAB_COUNT_BEFORE_OPEN=$(status_number native_tab_count)
 	if [ "$RESTORE_OPEN_TAB_DELAY_SECONDS" != 0 ]; then
 		trace_restore "open_ghostty_surface.sleep.start" \
 			"seconds=$RESTORE_OPEN_TAB_DELAY_SECONDS"
@@ -69,9 +171,10 @@ open_ghostty_surface()
 	trace_restore "open_ghostty_surface.applescript.start"
 	osascript \
 		-e 'tell application "Ghostty" to activate' \
-		-e 'tell application "Ghostty" to new tab in front window' \
+		-e 'tell application "System Events" to key code 31 using {control down, shift down}' \
 		>/dev/null 2>&1 || true
 	trace_restore "open_ghostty_surface.applescript.end"
+	move_native_tab_to_position "$target_position"
 }
 
 restore_field()
@@ -175,10 +278,11 @@ RUNTIME_WINDOW=$(printf '%s\n' "$RUNTIME_RESTORE" |
 	sed -n 's/.*"restored": true.*"window": "\([^"]*\)".*/\1/p')
 if [ -n "$RUNTIME_WINDOW" ]; then
 	now_ms > "$REQUEST_STAMP"
+	RUNTIME_POSITION=$(restored_window_position "$RUNTIME_WINDOW")
 	trace_restore "runtime_restore.marker.start" "window=$RUNTIME_WINDOW"
 	write_window_marker "$RUNTIME_WINDOW"
 	trace_restore "runtime_restore.marker.end" "window=$RUNTIME_WINDOW"
-	open_ghostty_surface
+	open_ghostty_surface "$RUNTIME_POSITION"
 	trace_restore "exit.after_runtime_open" "window=$RUNTIME_WINDOW"
 	exit 0
 fi

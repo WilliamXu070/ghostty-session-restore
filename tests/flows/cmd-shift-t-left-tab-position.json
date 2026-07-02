@@ -17,8 +17,11 @@
       "as": "ui_start"
     },
     {
-      "do": "cmd_t",
-      "from": "start"
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ]
     },
     {
       "do": "wait",
@@ -39,6 +42,12 @@
       "name": "left"
     },
     {
+      "do": "rename_window",
+      "from": "after_cmd_t",
+      "target": "window_index:1",
+      "name": "right"
+    },
+    {
       "do": "send_keys",
       "from": "after_cmd_t",
       "target": "window_index:0",
@@ -56,9 +65,23 @@
       "as": "dirty_left"
     },
     {
-      "do": "cmd_w",
-      "from": "dirty_left",
-      "target": "window_index:0"
+      "do": "physical_shortcut",
+      "key": "left_bracket",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 0.5
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ]
     },
     {
       "do": "wait",
@@ -136,14 +159,27 @@
       "windows": 2,
       "panes": 2,
       "lifo": 0,
-      "dirty_windows": 0,
-      "dirty_panes": 0
+      "dirty_windows": 1,
+      "dirty_panes": 1
     },
     {
       "ui_state": "ui_after_restore",
       "native_tabs": 2,
       "rail_tabs": 2,
-      "active_native_tab_index": 0
+      "active_native_tab_index": 0,
+      "native_tab_id_matches": [
+        {
+          "index": 1,
+          "ui_state": "ui_after_delete",
+          "source_index": 0
+        }
+      ],
+      "native_tab_id_differs": [
+        {
+          "left": 0,
+          "right": 1
+        }
+      ]
     }
   ]
 }

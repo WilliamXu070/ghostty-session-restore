@@ -32,11 +32,15 @@ final class NewmuxUIModel: ObservableObject {
             NSWindow.willCloseNotification,
             TerminalWindow.terminalDidAwake,
             TerminalWindow.terminalWillCloseNotification,
+            .ghosttyMoveTab,
         ]
 
         observers = names.map { name in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    self?.refresh()
+                }
             }
         }
     }
@@ -114,6 +118,15 @@ final class NewmuxUIModel: ObservableObject {
         nextStatus.nativeTabCount = tabs.count
         nextStatus.railTabCount = tabs.count
         nextStatus.activeNativeTabIndex = activeIndex
+        nextStatus.nativeTabs = tabs.enumerated().map { index, tab in
+            NewmuxUITabStatus(
+                index: index,
+                id: tab.id,
+                title: tab.title,
+                subtitle: tab.subtitle,
+                active: tab.isActive
+            )
+        }
         nextStatus.activeRailTabId = activeIndex >= 0 ? tabs[activeIndex].id : nil
         nextStatus.bridgeConnected = ProcessInfo.processInfo.environment["NEWMUX_UI_BRIDGE_SOCKET"]?.isEmpty == false
         nextStatus.updatedAt = Date().timeIntervalSince1970

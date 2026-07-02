@@ -90,7 +90,8 @@ fi
 echo "$!" > "$BRIDGE_PID"
 
 CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.cache"}
-PATCHED_GHOSTTY_APP=${NEWMUX_GHOSTTY_APP:-"$CACHE_HOME/newmux/ghostty-macos-build/Debug/Ghostty.app"}
+GHOSTTY_CONFIGURATION=${NEWMUX_GHOSTTY_CONFIGURATION:-ReleaseLocal}
+PATCHED_GHOSTTY_APP=${NEWMUX_GHOSTTY_APP:-"$CACHE_HOME/newmux/ghostty-macos-build/$GHOSTTY_CONFIGURATION/Ghostty.app"}
 USE_PATCHED_GHOSTTY=${NEWMUX_USE_PATCHED_GHOSTTY:-1}
 GHOSTTY_LAUNCH_PATH=${NEWMUX_GHOSTTY_LAUNCH_PATH:-"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
 

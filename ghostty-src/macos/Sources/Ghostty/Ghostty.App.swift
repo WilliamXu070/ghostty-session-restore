@@ -917,6 +917,21 @@ extension Ghostty {
             return "@0"
         }
 
+        private static func newmuxSurfaceView(from target: ghostty_target_s) -> SurfaceView? {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                return TerminalController.preferredParent?.focusedSurface
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return nil }
+                return self.surfaceView(from: surface)
+
+            default:
+                assertionFailure()
+                return nil
+            }
+        }
+
         private static func inheritedTabConfig(from surface: ghostty_surface_t) -> SurfaceConfiguration {
             SurfaceConfiguration(from: ghostty_surface_inherited_config(surface, GHOSTTY_SURFACE_CONTEXT_TAB))
         }
@@ -968,6 +983,7 @@ extension Ghostty {
                 }
 
                 let result: [String: Any]?
+                var insertAt: Int?
                 if let attachWindow = request.attach_window {
                     var payload: [String: Any] = [
                         "ok": true,
@@ -975,6 +991,7 @@ extension Ghostty {
                     ]
                     if request.insert_at >= 0 {
                         payload["target_index"] = Int(request.insert_at)
+                        insertAt = Int(request.insert_at)
                     }
                     result = payload
                 } else {
@@ -990,7 +1007,7 @@ extension Ghostty {
                     surfaceView: surfaceView,
                     baseConfig: inheritedTabConfig(from: surface),
                     windowId: windowId,
-                    insertAt: result["target_index"] as? Int
+                    insertAt: insertAt
                 )
                 return true
 
@@ -1097,32 +1114,20 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s
         ) -> Bool {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.warning("newmux close tab does nothing with an app target")
-                return false
+            guard let surfaceView = newmuxSurfaceView(from: target) else { return false }
+            let windowId = newmuxWindowId(from: surfaceView)
+            guard runNewmuxRuntime([
+                "delete-window",
+                "--primary-session", ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux",
+                "--target-window", windowId,
+                "--json",
+            ]) != nil else { return false }
 
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return false }
-                guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                let windowId = newmuxWindowId(from: surfaceView)
-                guard runNewmuxRuntime([
-                    "delete-window",
-                    "--primary-session", ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux",
-                    "--target-window", windowId,
-                    "--json",
-                ]) != nil else { return false }
-
-                NotificationCenter.default.post(
-                    name: .ghosttyCloseTab,
-                    object: surfaceView
-                )
-                return true
-
-            default:
-                assertionFailure()
-                return false
-            }
+            NotificationCenter.default.post(
+                name: .ghosttyCloseTab,
+                object: surfaceView
+            )
+            return true
         }
 
         private static func newmuxRestoreTab(
