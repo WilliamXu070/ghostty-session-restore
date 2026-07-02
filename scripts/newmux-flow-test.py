@@ -520,21 +520,27 @@ class FlowRunner:
         if key not in key_codes:
             raise FlowFailure(f"unsupported physical shortcut key: {key}")
         mods = ", ".join(modifiers)
+        key_script = (
+            f"key code {key_codes[key]} using {{{mods}}}"
+            if mods
+            else f"key code {key_codes[key]}"
+        )
         self.event("action.start", action="press_ghostty_shortcut", key=key, modifiers=modifiers)
         proc = self.run_cmd(
             [
                 "osascript",
                 "-e",
                 (
-                    'tell application "System Events" to set frontmost of '
-                    f'(first process whose unix id is {self.ghostty_pid}) to true'
+                    'tell application "System Events"\n'
+                    f'  set targetProc to first process whose unix id is {self.ghostty_pid}\n'
+                    '  set frontmost of targetProc to true\n'
+                    '  delay 0.25\n'
+                    '  set frontPid to unix id of first process whose frontmost is true\n'
+                    f'  if frontPid is not {self.ghostty_pid} then error '
+                    f'"frontmost pid " & frontPid & " != expected {self.ghostty_pid}"\n'
+                    f'  {key_script}\n'
+                    'end tell'
                 ),
-                "-e",
-                'tell application "Ghostty" to activate',
-                "-e",
-                "delay 0.25",
-                "-e",
-                f'tell application "System Events" to key code {key_codes[key]} using {{{mods}}}',
             ],
             check=False,
         )
