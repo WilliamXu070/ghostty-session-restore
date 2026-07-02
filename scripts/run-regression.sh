@@ -66,7 +66,7 @@ scope_matches_file()
 	for pattern in "$@"; do
 		[ -z "$pattern" ] && continue
 		case "$pattern" in
-			-|*) continue ;;
+			-) continue ;;
 		esac
 		case "$file" in
 			$pattern)

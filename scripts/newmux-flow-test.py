@@ -555,7 +555,38 @@ class FlowRunner:
         pane_id = self.choose_target_pane(from_state, target)
         self.event("action.start", action="send_keys", target_pane=pane_id, keys=keys)
         self.newmux_cmd("send-keys", "-t", pane_id, *keys)
-        self.event("action.end", action="send_keys", target_pane=pane_id, keys=keys)
+        shell_command = self.submitted_shell_command(keys)
+        if shell_command is not None:
+            self.run_cmd(
+                [
+                    "python3",
+                    str(ROOT / "scripts" / "newmux-runtime.py"),
+                    "command",
+                    "--socket-path",
+                    self.socket_path(),
+                    "--pane",
+                    pane_id,
+                    "--shell-command",
+                    shell_command,
+                    "--json",
+                ]
+            )
+        self.event(
+            "action.end",
+            action="send_keys",
+            target_pane=pane_id,
+            keys=keys,
+            shell_command=shell_command,
+        )
+
+    def submitted_shell_command(self, keys: list[str]) -> str | None:
+        command_parts = []
+        for key in keys:
+            if key == "Enter":
+                command = " ".join(command_parts).strip()
+                return command or None
+            command_parts.append(key)
+        return None
 
     def run_steps(self) -> None:
         for index, step in enumerate(self.flow.get("steps", []), start=1):

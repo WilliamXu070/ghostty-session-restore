@@ -270,6 +270,13 @@ should not be used as-is.
 After each implementation branch merge:
 
 ```sh
+./scripts/run-correctness-gate.sh
+./scripts/sample-performance.sh
+```
+
+`run-correctness-gate.sh` runs:
+
+```sh
 ./scripts/build-newmux.sh
 ./scripts/test-newmux.sh
 ./scripts/test-ghostty-config.sh
@@ -278,8 +285,17 @@ python3 scripts/newmux-flow-test.py tests/flows/cmd-w-ui-tab-sync.json
 python3 scripts/newmux-flow-test.py tests/flows/cmd-shift-t-noop-empty.json
 python3 scripts/newmux-flow-test.py tests/flows/cmd-shift-t-restore-runtime-lifo.json
 python3 scripts/newmux-flow-test.py tests/flows/cmd-t-new-tab-same-server.json
-./scripts/benchmark-newmux-lifecycle.py --passes 3 --timeout 10 \
-  --out .local/benchmarks/newmux-lifecycle-after.json
+```
+
+`sample-performance.sh` runs `benchmark-newmux-lifecycle.py` and writes a timestamped
+JSON sample under `.local/benchmarks/`. Thresholds remain advisory until the
+lifecycle numbers stabilize.
+
+The same commands are registered in `scripts/regression-manifest.tsv`:
+
+```sh
+./scripts/run-regression.sh --test gate-correctness
+./scripts/run-regression.sh --test perf-lifecycle-sample --include-manual
 ```
 
 If Ghostty source changed:
