@@ -263,6 +263,18 @@ def window_index(
     return None
 
 
+def window_position(
+    socket_path: str | None,
+    socket_name_arg: str,
+    session: str,
+    window_id: str,
+) -> int | None:
+    for position, row in enumerate(session_windows(socket_path, socket_name_arg, session)):
+        if row["window"] == window_id:
+            return position
+    return None
+
+
 def sync_workspace_order(
     socket_path: str | None,
     socket_name_arg: str,
@@ -650,7 +662,7 @@ def create_window(args: argparse.Namespace) -> int:
         argv.extend(["-c", cwd])
     window_id = newmux(args.socket_path, socket_name_arg, *argv).strip()
     marked = mark_target(args.socket_path, socket_name_arg, run_dir, window_id, args.primary_session)
-    target_index = window_index(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
     runtime_event(
         run_dir,
         "window.create",
@@ -824,7 +836,7 @@ def restore_latest(args: argparse.Namespace) -> int:
         item,
     )
     sync_workspace_order(args.socket_path, socket_name_arg, run_dir, args.primary_session)
-    target_index = window_index(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
     tab_restore = restore_tab_session_windows(args.socket_path, socket_name_arg, run_dir)
     restored.add(int(item["sequence"]))
     write_restored_sequences(run_dir, restored)
