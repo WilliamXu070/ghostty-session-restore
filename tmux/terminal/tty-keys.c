@@ -760,7 +760,7 @@ tty_keys_newmux_scroll(struct tty *tty, const char *buf, size_t len,
 	size_t		 end, nfields = 0;
 	long long	 yoff_milli, xoff_milli, ydelta, xdelta;
 	long long	 precision, momentum;
-	unsigned long long lines_milli, ticks;
+	unsigned long long lines_milli, delta_lines_milli, ticks;
 
 	*size = 0;
 
@@ -821,11 +821,14 @@ tty_keys_newmux_scroll(struct tty *tty, const char *buf, size_t len,
 	if (*endptr != '\0')
 		return (-1);
 
+	delta_lines_milli = tty_keys_newmux_absll(ydelta) * 1000ULL;
 	if (precision && tty->ypixel != 0 && tty->sy != 0) {
 		lines_milli = tty_keys_newmux_absll(yoff_milli);
 		lines_milli = (lines_milli * tty->sy) / tty->ypixel;
+		if (lines_milli < delta_lines_milli)
+			lines_milli = delta_lines_milli;
 	} else
-		lines_milli = tty_keys_newmux_absll(ydelta) * 1000ULL;
+		lines_milli = delta_lines_milli;
 	if (lines_milli == 0)
 		lines_milli = 1000;
 	if (lines_milli > UINT_MAX)
