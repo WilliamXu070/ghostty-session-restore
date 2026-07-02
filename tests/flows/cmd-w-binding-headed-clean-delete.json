@@ -1,5 +1,5 @@
 {
-  "name": "cmd-w-binding-headed-clean-delete",
+  "name": "cmd-w-native-headed-clean-delete",
   "setup": {
     "type": "fresh-ghostty",
     "wait": 2
@@ -10,17 +10,26 @@
       "as": "start"
     },
     {
-      "do": "cmd_t",
-      "from": "start"
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
     },
     {
       "do": "snapshot",
       "as": "after_cmd_t"
     },
     {
-      "do": "cmd_w_binding",
-      "from": "after_cmd_t",
-      "target": "latest_window"
+      "do": "physical_shortcut",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ]
     },
     {
       "do": "wait",
