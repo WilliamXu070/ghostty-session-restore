@@ -865,7 +865,19 @@ extension Ghostty {
             return "/Users/williamxu/Desktop/Projects/newmux"
         }
 
-        private static func newmuxSocketArgs() -> [String] {
+        private static func newmuxPrimarySession() -> String {
+            ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux"
+        }
+
+        private static func newmuxCommandSocketArgs() -> [String] {
+            let env = ProcessInfo.processInfo.environment
+            if let path = env["NEWMUX_SOCKET_PATH"], !path.isEmpty {
+                return ["-S", path]
+            }
+            return ["-L", env["NEWMUX_SOCKET"] ?? "newmux-dev"]
+        }
+
+        private static func newmuxRuntimeSocketArgs() -> [String] {
             let env = ProcessInfo.processInfo.environment
             if let path = env["NEWMUX_SOCKET_PATH"], !path.isEmpty {
                 return ["--socket-path", path]
@@ -873,13 +885,26 @@ extension Ghostty {
             return ["--socket-name", env["NEWMUX_SOCKET"] ?? "newmux-dev"]
         }
 
-        private static func runNewmuxRuntime(_ command: [String]) -> [String: Any]? {
+        private static func parseNewmuxFields(_ output: Data) -> [String: String]? {
+            guard let text = String(data: output, encoding: .utf8) else { return nil }
+            guard let line = text.split(whereSeparator: \.isNewline).first else { return [:] }
+            var result: [String: String] = [:]
+            for field in line.split(whereSeparator: \.isWhitespace) {
+                guard let separator = field.firstIndex(of: "=") else { continue }
+                let key = String(field[..<separator])
+                let valueStart = field.index(after: separator)
+                result[key] = String(field[valueStart...])
+            }
+            return result
+        }
+
+        private static func runNewmuxCommand(_ command: [String]) -> [String: String]? {
             let root = newmuxRoot()
             let process = Process()
             let stdout = Pipe()
             let stderr = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["python3", "\(root)/scripts/newmux-runtime.py"] + command + newmuxSocketArgs()
+            process.executableURL = URL(fileURLWithPath: "\(root)/bin/newmux")
+            process.arguments = newmuxCommandSocketArgs() + command
             process.standardOutput = stdout
             process.standardError = stderr
 
@@ -887,7 +912,7 @@ extension Ghostty {
                 try process.run()
                 process.waitUntilExit()
             } catch {
-                Ghostty.logger.error("newmux runtime failed to start: \(error.localizedDescription)")
+                Ghostty.logger.error("newmux command failed to start: \(error.localizedDescription)")
                 return nil
             }
 
@@ -895,16 +920,59 @@ extension Ghostty {
             let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
             guard process.terminationStatus == 0 else {
                 let detail = String(data: errorOutput + output, encoding: .utf8) ?? ""
-                Ghostty.logger.error("newmux runtime failed status=\(process.terminationStatus) output=\(detail)")
+                Ghostty.logger.error("newmux command failed status=\(process.terminationStatus) output=\(detail)")
                 return nil
             }
 
-            do {
-                return try JSONSerialization.jsonObject(with: output) as? [String: Any]
-            } catch {
+            guard let parsed = parseNewmuxFields(output) else {
                 let detail = String(data: output, encoding: .utf8) ?? ""
-                Ghostty.logger.error("newmux runtime returned invalid JSON: \(detail)")
+                Ghostty.logger.error("newmux command returned invalid output: \(detail)")
                 return nil
+            }
+            return parsed
+        }
+
+        private static func runNewmuxRuntimeCompatibility(_ command: [String]) {
+            let root = newmuxRoot()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["python3", "\(root)/scripts/newmux-runtime.py"] + command + newmuxRuntimeSocketArgs()
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                Ghostty.logger.error("newmux compatibility mirror failed to start: \(error.localizedDescription)")
+            }
+        }
+
+        private static func mirrorNewmuxDelete(_ result: [String: String], fallbackWindowId: String) {
+            let mode = result["mode"] ?? "hard"
+            guard let sequence = result["sequence"], mode == "soft" else { return }
+            let windowId = result["window"] ?? result["window_id"] ?? fallbackWindowId
+            var command = [
+                "mirror-native-delete",
+                "--primary-session", newmuxPrimarySession(),
+                "--target-window", windowId,
+                "--sequence", sequence,
+                "--mode", mode,
+            ]
+            if let targetIndex = result["target_index"] {
+                command += ["--target-index", targetIndex]
+            }
+            DispatchQueue.global(qos: .utility).async {
+                Self.runNewmuxRuntimeCompatibility(command)
+            }
+        }
+
+        private static func mirrorNewmuxRestore(_ result: [String: String]) {
+            guard let sequence = result["sequence"] else { return }
+            DispatchQueue.global(qos: .utility).async {
+                Self.runNewmuxRuntimeCompatibility([
+                    "mirror-native-restore",
+                    "--sequence", sequence,
+                ])
             }
         }
 
@@ -982,27 +1050,28 @@ extension Ghostty {
                     return false
                 }
 
-                let result: [String: Any]?
+                let result: [String: String]?
                 var insertAt: Int?
                 if let attachWindow = request.attach_window {
-                    var payload: [String: Any] = [
-                        "ok": true,
+                    var payload: [String: String] = [
+                        "ok": "1",
                         "window": String(cString: attachWindow),
                     ]
                     if request.insert_at >= 0 {
-                        payload["target_index"] = Int(request.insert_at)
+                        payload["target_index"] = String(request.insert_at)
                         insertAt = Int(request.insert_at)
                     }
                     result = payload
                 } else {
-                    result = runNewmuxRuntime([
-                        "create-window",
-                        "--primary-session", ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux",
-                        "--target", newmuxWindowId(from: surfaceView),
+                    result = runNewmuxCommand([
+                        "newmux-create-window",
+                        "-P",
+                        "-s", newmuxPrimarySession(),
+                        "-t", newmuxWindowId(from: surfaceView),
                     ])
                 }
                 guard let result,
-                      let windowId = result["window"] as? String else { return false }
+                      let windowId = result["window"] ?? result["window_id"] else { return false }
                 postNewmuxTab(
                     surfaceView: surfaceView,
                     baseConfig: inheritedTabConfig(from: surface),
@@ -1116,12 +1185,13 @@ extension Ghostty {
         ) -> Bool {
             guard let surfaceView = newmuxSurfaceView(from: target) else { return false }
             let windowId = newmuxWindowId(from: surfaceView)
-            guard runNewmuxRuntime([
-                "delete-window",
-                "--primary-session", ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux",
-                "--target-window", windowId,
-                "--json",
-            ]) != nil else { return false }
+            guard let result = runNewmuxCommand([
+                "newmux-delete-window",
+                "-P",
+                "-s", newmuxPrimarySession(),
+                "-t", windowId,
+            ]) else { return false }
+            mirrorNewmuxDelete(result, fallbackWindowId: windowId)
 
             NotificationCenter.default.post(
                 name: .ghosttyCloseTab,
@@ -1134,39 +1204,25 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s
         ) -> Bool {
-            switch target.tag {
-            case GHOSTTY_TARGET_APP:
-                Ghostty.logger.info("newmux restore tab requested; backend hook is not wired yet")
-                NotificationCenter.default.post(
-                    name: Notification.ghosttyNewmuxRestoreTab,
-                    object: nil
-                )
-                return true
+            guard let surfaceView = newmuxSurfaceView(from: target),
+                  let surface = surfaceView.surface else { return false }
+            let result = runNewmuxCommand([
+                "newmux-reopen-latest-closed",
+                "-P",
+                "-t", "\(newmuxPrimarySession()):",
+            ])
+            guard let result else { return false }
+            guard result["restored"] != "0",
+                  let windowId = result["window"] ?? result["window_id"] else { return true }
 
-            case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return false }
-                guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                let result = runNewmuxRuntime([
-                    "restore-latest",
-                    "--primary-session", ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux",
-                    "--json",
-                ])
-                guard let result,
-                      (result["restored"] as? Bool) == true,
-                      let windowId = result["window"] as? String else { return true }
-
-                postNewmuxTab(
-                    surfaceView: surfaceView,
-                    baseConfig: inheritedTabConfig(from: surface),
-                    windowId: windowId,
-                    insertAt: result["target_index"] as? Int
-                )
-                return true
-
-            default:
-                assertionFailure()
-                return false
-            }
+            mirrorNewmuxRestore(result)
+            postNewmuxTab(
+                surfaceView: surfaceView,
+                baseConfig: inheritedTabConfig(from: surface),
+                windowId: windowId,
+                insertAt: result["target_index"].flatMap { Int($0) }
+            )
+            return true
         }
 
         private static func closeWindow(_ app: ghostty_app_t, target: ghostty_target_s) {
