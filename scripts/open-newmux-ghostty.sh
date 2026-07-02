@@ -100,6 +100,7 @@ if [ "$(uname)" = Darwin ] && [ -d "$PATCHED_GHOSTTY_APP" ] && \
 		(
 			exec env XDG_CONFIG_HOME="$XDG_HOME" \
 				PATH="$GHOSTTY_LAUNCH_PATH" \
+				NEWMUX_ROOT="$ROOT" \
 				NEWMUX_USER_ZSHRC_SOURCED="${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 				NEWMUX_SOCKET="$NEWMUX_SOCKET" \
 				NEWMUX_SOCKET_PATH="$NEWMUX_SOCKET_PATH" \
@@ -117,6 +118,7 @@ if [ "$(uname)" = Darwin ] && [ -d "$PATCHED_GHOSTTY_APP" ] && \
 	exec open \
 		--env "XDG_CONFIG_HOME=$XDG_HOME" \
 		--env "PATH=$GHOSTTY_LAUNCH_PATH" \
+		--env "NEWMUX_ROOT=$ROOT" \
 		--env "NEWMUX_USER_ZSHRC_SOURCED=${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 		--env "NEWMUX_SOCKET=$NEWMUX_SOCKET" \
 		--env "NEWMUX_SOCKET_PATH=$NEWMUX_SOCKET_PATH" \
@@ -137,6 +139,7 @@ elif [ "$(uname)" = Darwin ] && [ -d /Applications/Ghostty.app ]; then
 			(
 				exec env XDG_CONFIG_HOME="$XDG_HOME" \
 				PATH="$GHOSTTY_LAUNCH_PATH" \
+				NEWMUX_ROOT="$ROOT" \
 					NEWMUX_USER_ZSHRC_SOURCED="${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 				NEWMUX_SOCKET="$NEWMUX_SOCKET" \
 				NEWMUX_SOCKET_PATH="$NEWMUX_SOCKET_PATH" \
@@ -154,6 +157,7 @@ elif [ "$(uname)" = Darwin ] && [ -d /Applications/Ghostty.app ]; then
 		exec open \
 			--env "XDG_CONFIG_HOME=$XDG_HOME" \
 			--env "PATH=$GHOSTTY_LAUNCH_PATH" \
+			--env "NEWMUX_ROOT=$ROOT" \
 			--env "NEWMUX_USER_ZSHRC_SOURCED=${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 			--env "NEWMUX_SOCKET=$NEWMUX_SOCKET" \
 		--env "NEWMUX_SOCKET_PATH=$NEWMUX_SOCKET_PATH" \
@@ -179,6 +183,7 @@ fi
 
 exec env XDG_CONFIG_HOME="$XDG_HOME" \
 	PATH="$GHOSTTY_LAUNCH_PATH" \
+	NEWMUX_ROOT="$ROOT" \
 	NEWMUX_USER_ZSHRC_SOURCED="${NEWMUX_USER_ZSHRC_SOURCED:-}" \
 	NEWMUX_SOCKET="$NEWMUX_SOCKET" \
 	NEWMUX_SOCKET_PATH="$NEWMUX_SOCKET_PATH" \
