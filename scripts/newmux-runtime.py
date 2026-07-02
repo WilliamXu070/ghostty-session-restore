@@ -61,6 +61,22 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def parse_newmux_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for token in text.split():
+        key, sep, value = token.partition("=")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def int_field(fields: dict[str, str], key: str) -> int | None:
+    try:
+        return int(fields[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def prompt_only_after_empty_baseline(baseline: dict[str, Any] | None, line_count: int) -> bool:
     return bool(
         baseline
@@ -222,6 +238,17 @@ def read_lifo_items(run_dir: Path, *, include_restored: bool = False) -> list[di
                 continue
         items.append(item)
     return items
+
+
+def append_lifo_item_if_missing(run_dir: Path, item: dict[str, Any]) -> bool:
+    sequence = int(item.get("sequence") or 0)
+    if sequence <= 0:
+        return False
+    for existing in read_lifo_items(run_dir, include_restored=True):
+        if int(existing.get("sequence") or 0) == sequence:
+            return False
+    append_jsonl(run_dir / "lifo.jsonl", item)
+    return True
 
 
 def session_windows(socket_path: str | None, socket_name_arg: str, session: str) -> list[dict[str, Any]]:
@@ -656,19 +683,29 @@ def cwd_from_target(
 def create_window(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
     socket_name_arg = socket_name(args.socket_path, args.socket_name)
-    cwd = cwd_from_target(socket_path=args.socket_path, socket_name_arg=socket_name_arg, target=args.target)
-    argv = ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", f"{args.primary_session}:"]
-    if cwd:
-        argv.extend(["-c", cwd])
-    window_id = newmux(args.socket_path, socket_name_arg, *argv).strip()
+    out = newmux(
+        args.socket_path,
+        socket_name_arg,
+        "newmux-create-window",
+        "-P",
+        "-s",
+        args.primary_session,
+        "-t",
+        args.target or f"{args.primary_session}:",
+    )
+    fields = parse_newmux_fields(out)
+    window_id = fields.get("window") or fields.get("window_id") or ""
+    if not window_id:
+        raise RuntimeError(f"newmux-create-window did not return a window: {out.strip()}")
     marked = mark_target(args.socket_path, socket_name_arg, run_dir, window_id, args.primary_session)
-    target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    target_index = int_field(fields, "target_index")
+    if target_index is None:
+        target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
     runtime_event(
         run_dir,
         "window.create",
         window=window_id,
         target=args.target,
-        cwd=cwd,
         target_index=target_index,
         marked=marked,
     )
@@ -678,7 +715,6 @@ def create_window(args: argparse.Namespace) -> int:
                 "ok": True,
                 "window": window_id,
                 "target_index": target_index,
-                "cwd": cwd,
                 "marked": marked,
             },
             sort_keys=True,
@@ -689,6 +725,7 @@ def create_window(args: argparse.Namespace) -> int:
 
 def command_entered(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
+    socket_name_arg = socket_name(args.socket_path, args.socket_name)
     commands = read_command_state(run_dir)
     pane = args.pane
     previous = commands.get(pane, {})
@@ -701,6 +738,7 @@ def command_entered(args: argparse.Namespace) -> int:
         "last_command_at": time.time(),
     }
     write_command_state(run_dir, commands)
+    newmux(args.socket_path, socket_name_arg, "set-option", "-p", "-q", "-t", pane, "@newmux-dirty", "1")
     runtime_event(
         run_dir,
         "pane.command_entered",
@@ -744,8 +782,18 @@ def delete(args: argparse.Namespace) -> int:
         {**row, **pane_status(args.socket_path, socket_name_arg, run_dir, row["pane"])}
         for row in rows
     ]
-    dirty = any(pane["dirty"] for pane in pane_states)
-    mode = "soft" if dirty else "hard"
+    out = newmux(
+        args.socket_path,
+        socket_name_arg,
+        "newmux-delete-window",
+        "-P",
+        "-s",
+        args.primary_session,
+        "-t",
+        window_id,
+    )
+    fields = parse_newmux_fields(out)
+    mode = fields.get("mode") or "hard"
     event = runtime_event(
         run_dir,
         "window.delete.request",
@@ -754,17 +802,14 @@ def delete(args: argparse.Namespace) -> int:
         target_pane=args.target_pane,
         panes=pane_states,
     )
-    if dirty:
-        sequence_path = run_dir / "lifo-sequence"
-        try:
-            sequence = int(sequence_path.read_text().strip()) + 1
-        except (OSError, ValueError):
-            sequence = 1
-        sequence_path.write_text(f"{sequence}\n")
+    if mode == "soft":
+        sequence = int_field(fields, "sequence")
+        if sequence is None:
+            raise RuntimeError(f"newmux-delete-window did not return a sequence: {out.strip()}")
         item = {
             "sequence": sequence,
             "kind": "window",
-            "window": window_id,
+            "window": fields.get("window") or fields.get("window_id") or window_id,
             "workspace": workspace,
             "original_index": order_context["original_index"],
             "left_neighbor": order_context["left_neighbor"],
@@ -776,19 +821,10 @@ def delete(args: argparse.Namespace) -> int:
             "mode": mode,
             "panes": pane_states,
         }
-        links_before = soft_hide_window(args.socket_path, socket_name_arg, run_dir, window_id)
-        append_jsonl(run_dir / "lifo.jsonl", item)
+        append_lifo_item_if_missing(run_dir, item)
         runtime_event(run_dir, "lifo.push", **item)
-        runtime_event(
-            run_dir,
-            "window.soft_hide",
-            window=window_id,
-            recovery_session=INTERNAL_RECOVERY_SESSION,
-            links_before=links_before,
-        )
         sync_workspace_order(args.socket_path, socket_name_arg, run_dir, workspace)
     else:
-        newmux(args.socket_path, socket_name_arg, "kill-window", "-t", window_id)
         runtime_event(run_dir, "window.hard_delete", window=window_id, reason="clean")
         sync_workspace_order(args.socket_path, socket_name_arg, run_dir, workspace)
 
@@ -817,48 +853,44 @@ def restore_latest(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
     socket_name_arg = socket_name(args.socket_path, args.socket_name)
     restored = read_restored_sequences(run_dir)
-    item = None
-    for candidate in reversed(read_lifo_items(run_dir)):
-        if candidate.get("kind") == "window" and candidate.get("window"):
-            item = candidate
-            break
-    if item is None:
+    out = newmux(
+        args.socket_path,
+        socket_name_arg,
+        "newmux-reopen-latest-closed",
+        "-P",
+        "-t",
+        f"{args.primary_session}:",
+    )
+    fields = parse_newmux_fields(out)
+    if fields.get("restored") == "0" or not (fields.get("window") or fields.get("window_id")):
         if args.json:
             print(json.dumps({"ok": True, "restored": False, "reason": "empty_stack"}, sort_keys=True))
         return 0
 
-    window_id = str(item["window"])
-    placement = link_window_at_region(
-        args.socket_path,
-        socket_name_arg,
-        args.primary_session,
-        window_id,
-        item,
-    )
+    window_id = fields.get("window") or fields.get("window_id") or ""
     sync_workspace_order(args.socket_path, socket_name_arg, run_dir, args.primary_session)
-    target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    target_index = int_field(fields, "target_index")
+    if target_index is None:
+        target_index = window_position(args.socket_path, socket_name_arg, args.primary_session, window_id)
     tab_restore = restore_tab_session_windows(args.socket_path, socket_name_arg, run_dir)
-    restored.add(int(item["sequence"]))
+    sequence = int_field(fields, "sequence")
+    if sequence is not None:
+        restored.add(sequence)
     write_restored_sequences(run_dir, restored)
     runtime_event(
         run_dir,
         "lifo.restore",
-        sequence=item["sequence"],
+        sequence=sequence,
         window=window_id,
         primary_session=args.primary_session,
-        placement=placement,
         target_index=target_index,
-        original_index=item.get("original_index"),
-        left_neighbor=item.get("left_neighbor"),
-        right_neighbor=item.get("right_neighbor"),
         tab_session_restore=tab_restore,
     )
     result = {
         "ok": True,
         "restored": True,
-        "sequence": item["sequence"],
+        "sequence": sequence,
         "window": window_id,
-        "placement": placement,
         "target_index": target_index,
     }
     if args.json:
@@ -892,6 +924,40 @@ def restore_tab_sessions(args: argparse.Namespace) -> int:
     runtime_event(run_dir, "native_tab_session.restore", **result)
     if args.json:
         print(json.dumps({"ok": True, **result}, sort_keys=True))
+    return 0
+
+
+def mirror_native_delete(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    sequence = int(args.sequence)
+    target_index = int(args.target_index) if args.target_index is not None else None
+    item = {
+        "sequence": sequence,
+        "kind": "window",
+        "window": args.target_window,
+        "workspace": args.primary_session,
+        "original_index": target_index,
+        "left_neighbor": None,
+        "right_neighbor": None,
+        "order_before_delete": [],
+        "names_before_delete": {},
+        "target_pane": None,
+        "deleted_at": time.time(),
+        "mode": args.mode,
+        "panes": [],
+        "native_mirror": True,
+    }
+    appended = append_lifo_item_if_missing(run_dir, item)
+    runtime_event(run_dir, "lifo.native_mirror_delete", appended=appended, **item)
+    return 0
+
+
+def mirror_native_restore(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    restored = read_restored_sequences(run_dir)
+    restored.add(int(args.sequence))
+    write_restored_sequences(run_dir, restored)
+    runtime_event(run_dir, "lifo.native_mirror_restore", sequence=int(args.sequence))
     return 0
 
 
@@ -963,6 +1029,20 @@ def main() -> int:
     add_common(restore_tabs_parser)
     restore_tabs_parser.add_argument("--json", action="store_true")
     restore_tabs_parser.set_defaults(func=restore_tab_sessions)
+
+    mirror_delete_parser = subparsers.add_parser("mirror-native-delete")
+    add_common(mirror_delete_parser)
+    mirror_delete_parser.add_argument("--primary-session", default="newmux")
+    mirror_delete_parser.add_argument("--target-window", required=True)
+    mirror_delete_parser.add_argument("--sequence", required=True)
+    mirror_delete_parser.add_argument("--mode", default="soft")
+    mirror_delete_parser.add_argument("--target-index")
+    mirror_delete_parser.set_defaults(func=mirror_native_delete)
+
+    mirror_restore_parser = subparsers.add_parser("mirror-native-restore")
+    add_common(mirror_restore_parser)
+    mirror_restore_parser.add_argument("--sequence", required=True)
+    mirror_restore_parser.set_defaults(func=mirror_native_restore)
 
     args = parser.parse_args()
     return args.func(args)

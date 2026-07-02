@@ -69,6 +69,10 @@ static enum cmd_retval	cmd_newmux_soft_delete_window_exec(struct cmd *,
 			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_soft_delete_session_exec(struct cmd *,
 			    struct cmdq_item *);
+static enum cmd_retval	cmd_newmux_create_window_exec(struct cmd *,
+			    struct cmdq_item *);
+static enum cmd_retval	cmd_newmux_delete_window_exec(struct cmd *,
+			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_reopen_latest_closed_exec(struct cmd *,
 			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_reserve_latest_closed_exec(struct cmd *,
@@ -117,6 +121,32 @@ const struct cmd_entry cmd_newmux_soft_delete_session_entry = {
 
 	.flags = 0,
 	.exec = cmd_newmux_soft_delete_session_exec
+};
+
+const struct cmd_entry cmd_newmux_create_window_entry = {
+	.name = "newmux-create-window",
+	.alias = NULL,
+
+	.args = { "Ps:t:", 0, 0, NULL },
+	.usage = "[-P] [-s primary-session] " CMD_TARGET_PANE_USAGE,
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = 0,
+	.exec = cmd_newmux_create_window_exec
+};
+
+const struct cmd_entry cmd_newmux_delete_window_entry = {
+	.name = "newmux-delete-window",
+	.alias = NULL,
+
+	.args = { "Ps:t:", 0, 0, NULL },
+	.usage = "[-P] [-s primary-session] " CMD_TARGET_WINDOW_USAGE,
+
+	.target = { 't', CMD_FIND_WINDOW, 0 },
+
+	.flags = 0,
+	.exec = cmd_newmux_delete_window_exec
 };
 
 const struct cmd_entry cmd_newmux_reopen_latest_closed_entry = {
@@ -190,6 +220,58 @@ newmux_closed_type_string(enum newmux_closed_type type)
 		return ("session");
 	}
 	return ("unknown");
+}
+
+static struct session *
+newmux_primary_session_from_args(struct cmdq_item *cmdq_item,
+    struct args *args, struct session *fallback)
+{
+	const char	*name;
+	struct session	*s;
+
+	name = args_get(args, 's');
+	if (name == NULL || *name == '\0')
+		return (fallback);
+
+	s = session_find(name);
+	if (s == NULL)
+		cmdq_error(cmdq_item, "newmux session missing: %s", name);
+	return (s);
+}
+
+static u_int
+newmux_window_position(struct session *s, struct window *w)
+{
+	struct winlink	*wl;
+	u_int		 position = 0;
+
+	RB_FOREACH(wl, winlinks, &s->windows) {
+		if (wl->window == w)
+			return (position);
+		position++;
+	}
+	return (position);
+}
+
+static void
+newmux_print_window_result(struct cmdq_item *cmdq_item, const char *action,
+    struct session *s, struct winlink *wl, struct window *w,
+    const char *extra)
+{
+	int	window_index = -1;
+	u_int	target_index = 0;
+
+	if (wl != NULL)
+		window_index = wl->idx;
+	if (s != NULL && w != NULL)
+		target_index = newmux_window_position(s, w);
+
+	cmdq_print(cmdq_item,
+	    "ok=1 action=%s kind=window window=@%u window_id=@%u "
+	    "window_index=%d target_index=%u%s%s",
+	    action, w != NULL ? w->id : 0, w != NULL ? w->id : 0,
+	    window_index, target_index, extra != NULL ? " " : "",
+	    extra != NULL ? extra : "");
 }
 
 static char *
@@ -632,6 +714,54 @@ newmux_window_looks_fresh(struct window *w)
 	return (newmux_pane_looks_fresh(wp));
 }
 
+static int
+newmux_pane_is_dirty(struct window_pane *wp)
+{
+	struct options_entry	*o;
+	char			*value;
+	int			 dirty = 0;
+
+	if (wp == NULL)
+		return (0);
+	o = options_get_only(wp->options, "@newmux-dirty");
+	if (o == NULL || !options_is_string(o))
+		return (0);
+	value = options_to_string(o, -1, 0);
+	if (value != NULL && *value != '\0' && strcmp(value, "0") != 0)
+		dirty = 1;
+	free(value);
+	return (dirty);
+}
+
+static int
+newmux_window_is_dirty(struct window *w)
+{
+	struct window_pane	*wp;
+
+	if (w == NULL)
+		return (0);
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		if (newmux_pane_is_dirty(wp))
+			return (1);
+	}
+	return (0);
+}
+
+static char *
+newmux_pane_current_path(struct window_pane *wp)
+{
+	char	*cwd;
+
+	if (wp == NULL)
+		return (NULL);
+	cwd = osdep_get_cwd(wp->fd);
+	if (cwd != NULL)
+		return (xstrdup(cwd));
+	if (wp->cwd != NULL)
+		return (xstrdup(wp->cwd));
+	return (NULL);
+}
+
 static struct session *
 newmux_recovery_session_get(__unused struct cmdq_item *item, struct client *tc,
     const char *cwd)
@@ -1046,29 +1176,155 @@ cmd_newmux_soft_delete_session_exec(__unused struct cmd *self,
 	return (CMD_RETURN_ERROR);
 }
 
+static enum cmd_retval
+cmd_newmux_create_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
+{
+	struct args		*args = cmd_get_args(self);
+	struct cmd_find_state	*target = cmdq_get_target(cmdq_item);
+	struct spawn_context	 sc = { 0 };
+	struct client		*tc = cmdq_get_target_client(cmdq_item);
+	struct session		*s;
+	struct winlink		*new_wl;
+	char			*cause = NULL, *cwd = NULL;
+
+	s = newmux_primary_session_from_args(cmdq_item, args, target->s);
+	if (s == NULL)
+		return (CMD_RETURN_ERROR);
+
+	cwd = newmux_pane_current_path(target->wp);
+	if (cwd == NULL)
+		cwd = xstrdup(server_client_get_cwd(tc, s));
+
+	sc.item = cmdq_item;
+	sc.s = s;
+	sc.tc = tc;
+	sc.environ = environ_create();
+	sc.idx = -1;
+	sc.cwd = cwd;
+	sc.flags = SPAWN_DETACHED;
+
+	new_wl = spawn_window(&sc, &cause);
+	if (new_wl == NULL) {
+		cmdq_error(cmdq_item, "newmux create window failed: %s", cause);
+		free(cause);
+		environ_free(sc.environ);
+		free(cwd);
+		return (CMD_RETURN_ERROR);
+	}
+
+	server_status_session_group(s);
+	if (args_has(args, 'P'))
+		newmux_print_window_result(cmdq_item, "create", s, new_wl,
+		    new_wl->window, NULL);
+
+	environ_free(sc.environ);
+	free(cwd);
+	return (CMD_RETURN_NORMAL);
+}
+
+static enum cmd_retval
+cmd_newmux_delete_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
+{
+	struct args			*args = cmd_get_args(self);
+	struct cmd_find_state		*target = cmdq_get_target(cmdq_item);
+	struct session			*s;
+	struct winlink			*wl;
+	struct window			*w;
+	struct newmux_closed_item	*item;
+	struct client			*tc = cmdq_get_target_client(cmdq_item);
+	int				 print = args_has(args, 'P');
+
+	if (target->wl == NULL)
+		return (CMD_RETURN_ERROR);
+
+	w = target->wl->window;
+	s = newmux_primary_session_from_args(cmdq_item, args, target->s);
+	if (s == NULL)
+		return (CMD_RETURN_ERROR);
+	wl = winlink_find_by_window(&s->windows, w);
+	if (wl == NULL) {
+		s = target->s;
+		wl = target->wl;
+	}
+
+	if (RB_NEXT(winlinks, &s->windows, wl) == NULL &&
+	    RB_PREV(winlinks, &s->windows, wl) == NULL) {
+		cmdq_error(cmdq_item,
+		    "newmux live tab recovery does not delete the last tab yet");
+		return (CMD_RETURN_ERROR);
+	}
+
+	if (!newmux_window_is_dirty(w)) {
+		if (print)
+			newmux_print_window_result(cmdq_item, "delete", s, wl,
+			    w, "mode=hard soft=0");
+		server_kill_window(w, 1);
+		return (CMD_RETURN_NORMAL);
+	}
+
+	item = newmux_item_from_window(s, wl);
+	if (newmux_break_live_window(cmdq_item, tc, item, s, wl) != 0) {
+		newmux_free_item(item);
+		return (CMD_RETURN_ERROR);
+	}
+	newmux_stack_push(item);
+	if (print) {
+		cmdq_print(cmdq_item,
+		    "ok=1 action=delete kind=window mode=soft soft=1 "
+		    "sequence=%u window=@%u window_id=@%u "
+		    "window_index=%d target_index=%u live=1",
+		    item->sequence, item->window_id, item->window_id,
+		    item->window_index, item->window_index >= 0 ?
+		    (u_int)item->window_index : 0);
+	}
+	return (CMD_RETURN_NORMAL);
+}
+
 static void
 newmux_print_closed_item(struct cmdq_item *cmdq_item,
     struct newmux_closed_item *item, int reserved)
 {
-	const char	*reserved_field;
+	const char	*reserved_field, *restored_field;
+	struct session	*s;
+	struct window	*w;
+	struct winlink	*wl = NULL;
+	int		 window_index;
+	u_int		 target_index;
 
 	reserved_field = reserved ? " reserved=1" : "";
+	restored_field = reserved ? " restored=0" : " restored=1";
+	window_index = item->window_index;
+	target_index = item->window_index >= 0 ? (u_int)item->window_index : 0;
+	s = session_find_by_id(item->session_id);
+	w = window_find_by_id(item->window_id);
+	if (s != NULL && w != NULL) {
+		wl = winlink_find_by_window(&s->windows, w);
+		if (wl != NULL) {
+			window_index = wl->idx;
+			target_index = newmux_window_position(s, w);
+		}
+	}
+
 	if (item->type == NEWMUX_CLOSED_PANE) {
 		cmdq_print(cmdq_item,
-		    "kind=pane sequence=%u session=%s window=%s "
-		    "window_id=@%u pane_id=%%%u live=1%s",
-		    item->sequence, item->session_name, item->window_name,
-		    item->window_id, item->pane_id, reserved_field);
+		    "ok=1 kind=pane sequence=%u window=@%u "
+		    "window_id=@%u pane_id=%%%u window_index=%d "
+		    "target_index=%u live=1%s%s",
+		    item->sequence, item->window_id, item->window_id,
+		    item->pane_id, window_index, target_index,
+		    reserved_field, restored_field);
 	} else if (item->type == NEWMUX_CLOSED_WINDOW) {
 		cmdq_print(cmdq_item,
-		    "kind=window sequence=%u session=%s window=%s "
-		    "window_id=@%u live=1%s",
-		    item->sequence, item->session_name, item->window_name,
-		    item->window_id, reserved_field);
+		    "ok=1 kind=window sequence=%u window=@%u "
+		    "window_id=@%u window_index=%d target_index=%u "
+		    "live=1%s%s",
+		    item->sequence, item->window_id, item->window_id,
+		    window_index, target_index, reserved_field,
+		    restored_field);
 	} else {
 		cmdq_print(cmdq_item,
-		    "kind=session sequence=%u session=%s live=1%s",
-		    item->sequence, item->session_name, reserved_field);
+		    "ok=1 kind=session sequence=%u live=1%s%s",
+		    item->sequence, reserved_field, restored_field);
 	}
 }
 
@@ -1094,8 +1350,12 @@ cmd_newmux_reopen_latest_closed_exec(struct cmd *self,
 	int				 print = args_has(args, 'P');
 
 	item = newmux_stack_pop();
-	if (item == NULL)
+	if (item == NULL) {
+		if (print)
+			cmdq_print(cmdq_item,
+			    "ok=1 action=restore restored=0 reason=empty_stack");
 		return (CMD_RETURN_NORMAL);
+	}
 
 	if (newmux_restore_closed_item(cmdq_item, item) != 0) {
 		newmux_stack_push(item);
