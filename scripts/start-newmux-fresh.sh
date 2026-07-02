@@ -14,6 +14,7 @@ RESTORE_CLAIM_DIR="$RESTORE_MARKER.claim"
 RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-30}
 NEWMUX_TAB_MARKER_WAIT_MS=${NEWMUX_TAB_MARKER_WAIT_MS:-150}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
+DIRECT_ATTACH_WINDOW=${NEWMUX_ATTACH_WINDOW:-}
 
 trace_now_ms()
 {
@@ -325,6 +326,14 @@ attach_native_tab_to_window()
 	fi
 	trace_restore "attach.select_window.end" "window_id=$window_id" \
 		"tab_session=$tab_session"
+	"$ROOT/scripts/newmux-runtime.py" remember-tab-session \
+		--socket-name "$SOCKET_NAME" \
+		--socket-path "$SOCKET_PATH" \
+		--tab-session "$tab_session" \
+		--window-id "$window_id" >/dev/null 2>&1 || true
+	"$ROOT/scripts/newmux-runtime.py" restore-tab-sessions \
+		--socket-name "$SOCKET_NAME" \
+		--socket-path "$SOCKET_PATH" >/dev/null 2>&1 || true
 	if [ "${NEWMUX_STARTER_PRINT_WINDOW:-0}" != 0 ]; then
 		trace_restore "attach.print_window" "window_id=$window_id"
 		printf '%s\n' "$window_id"
@@ -360,6 +369,17 @@ if [ ! -x "$ROOT/bin/newmux" ]; then
 	trace_restore "build_missing_binary.start"
 	"$ROOT/scripts/build-newmux.sh"
 	trace_restore "build_missing_binary.end"
+fi
+
+if [ "${1:-}" != kill-only ] && [ -n "$DIRECT_ATTACH_WINDOW" ]; then
+	trace_restore "direct_attach.start" "window_id=$DIRECT_ATTACH_WINDOW"
+	if validate_window_id "$DIRECT_ATTACH_WINDOW" &&
+		newmux display-message -p -t "$DIRECT_ATTACH_WINDOW" \
+			'#{window_id}' >/dev/null 2>&1; then
+		attach_native_tab_to_window "$DIRECT_ATTACH_WINDOW"
+	fi
+	trace_restore "direct_attach.invalid" "window_id=$DIRECT_ATTACH_WINDOW"
+	exit 0
 fi
 
 if [ "${1:-}" != kill-only ] && has_attached_clients; then

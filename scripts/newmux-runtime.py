@@ -85,6 +85,10 @@ def order_ledger_path(run_dir: Path) -> Path:
     return run_dir / "window-order.json"
 
 
+def tab_session_map_path(run_dir: Path) -> Path:
+    return run_dir / "native-tab-sessions.json"
+
+
 def read_baselines(run_dir: Path) -> dict[str, Any]:
     try:
         return json.loads(baseline_path(run_dir).read_text())
@@ -143,6 +147,60 @@ def write_order_ledger(run_dir: Path, ledger: dict[str, Any]) -> None:
     tmp.replace(target)
 
 
+def read_tab_session_map(run_dir: Path) -> dict[str, str]:
+    try:
+        data = json.loads(tab_session_map_path(run_dir).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        str(session): str(window)
+        for session, window in data.items()
+        if str(session) and str(window).startswith("@")
+    }
+
+
+def write_tab_session_map(run_dir: Path, mapping: dict[str, str]) -> None:
+    target = tab_session_map_path(run_dir)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(mapping, indent=2, sort_keys=True) + "\n")
+    tmp.replace(target)
+
+
+def restore_tab_session_windows(
+    socket_path: str | None,
+    socket_name_arg: str,
+    run_dir: Path,
+) -> dict[str, Any]:
+    mapping = read_tab_session_map(run_dir)
+    kept: dict[str, str] = {}
+    restored: list[dict[str, str]] = []
+    dropped: list[dict[str, str]] = []
+    for session, window_id in mapping.items():
+        exists = bool(
+            newmux(
+                socket_path,
+                socket_name_arg,
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{session_name}",
+                check=False,
+            ).strip()
+        )
+        if not exists:
+            dropped.append({"session": session, "window": window_id})
+            continue
+        windows = {row["window"] for row in session_windows(socket_path, socket_name_arg, session)}
+        if window_id in windows:
+            newmux(socket_path, socket_name_arg, "select-window", "-t", f"{session}:{window_id}", check=False)
+            restored.append({"session": session, "window": window_id})
+        kept[session] = window_id
+    if kept != mapping:
+        write_tab_session_map(run_dir, kept)
+    return {"restored": restored, "dropped": dropped}
+
+
 def read_lifo_items(run_dir: Path, *, include_restored: bool = False) -> list[dict[str, Any]]:
     restored = read_restored_sequences(run_dir)
     items = []
@@ -191,6 +249,18 @@ def session_windows(socket_path: str | None, socket_name_arg: str, session: str)
             }
         )
     return sorted(rows, key=lambda row: row["index"])
+
+
+def window_index(
+    socket_path: str | None,
+    socket_name_arg: str,
+    session: str,
+    window_id: str,
+) -> int | None:
+    for row in session_windows(socket_path, socket_name_arg, session):
+        if row["window"] == window_id:
+            return row["index"]
+    return None
 
 
 def sync_workspace_order(
@@ -344,6 +414,7 @@ def pane_rows(socket_path: str | None, socket_name_arg: str, target: str) -> lis
             "#{pane_current_path}",
             "#{pane_current_command}",
             "#{pane_pid}",
+            "#{pane_active}",
         ]
     )
     rows = []
@@ -353,6 +424,7 @@ def pane_rows(socket_path: str | None, socket_name_arg: str, target: str) -> lis
         if len(fields) < 10:
             continue
         sid, session, group, window, window_index, pane, pane_index, path, command, pid = fields[:10]
+        active = fields[10] if len(fields) > 10 else "0"
         rows.append(
             {
                 "session_id": sid,
@@ -365,9 +437,14 @@ def pane_rows(socket_path: str | None, socket_name_arg: str, target: str) -> lis
                 "path": path,
                 "command": command,
                 "pid": int(pid or "0"),
+                "active": active == "1",
             }
         )
     return rows
+
+
+def active_pane_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return next((row for row in rows if row.get("active")), rows[0])
 
 
 def window_links(socket_path: str | None, socket_name_arg: str, window_id: str) -> list[dict[str, Any]]:
@@ -492,15 +569,20 @@ def pane_status(
     }
 
 
-def mark_panes(args: argparse.Namespace) -> int:
-    run_dir = runtime_dir(args.socket_path, args.socket_name)
+def mark_target(
+    socket_path: str | None,
+    socket_name_arg: str,
+    run_dir: Path,
+    target: str,
+    workspace: str,
+) -> list[str]:
     baselines = read_baselines(run_dir)
     commands = read_command_state(run_dir)
-    rows = pane_rows(args.socket_path, socket_name(args.socket_path, args.socket_name), args.target)
+    rows = pane_rows(socket_path, socket_name_arg, target)
     capture_baseline = os.environ.get("NEWMUX_MARK_CAPTURE_BASELINE") not in (None, "", "0")
     for row in rows:
         capture = (
-            capture_pane(args.socket_path, socket_name(args.socket_path, args.socket_name), row["pane"])
+            capture_pane(socket_path, socket_name_arg, row["pane"])
             if capture_baseline
             else ""
         )
@@ -522,12 +604,74 @@ def mark_panes(args: argparse.Namespace) -> int:
     write_baselines(run_dir, baselines)
     write_command_state(run_dir, commands)
     sync_workspace_order(
+        socket_path,
+        socket_name_arg,
+        run_dir,
+        workspace,
+    )
+    return [row["pane"] for row in rows]
+
+
+def mark_panes(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    marked = mark_target(
         args.socket_path,
         socket_name(args.socket_path, args.socket_name),
         run_dir,
+        args.target,
         args.workspace,
     )
-    print(json.dumps({"ok": True, "marked": [row["pane"] for row in rows]}, sort_keys=True))
+    print(json.dumps({"ok": True, "marked": marked}, sort_keys=True))
+    return 0
+
+
+def cwd_from_target(
+    socket_path: str | None,
+    socket_name_arg: str,
+    target: str | None,
+) -> str | None:
+    if not target:
+        return None
+    try:
+        rows = pane_rows(socket_path, socket_name_arg, target)
+    except RuntimeError:
+        return None
+    if not rows:
+        return None
+    return str(active_pane_row(rows).get("path") or "") or None
+
+
+def create_window(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    socket_name_arg = socket_name(args.socket_path, args.socket_name)
+    cwd = cwd_from_target(socket_path=args.socket_path, socket_name_arg=socket_name_arg, target=args.target)
+    argv = ["new-window", "-d", "-P", "-F", "#{window_id}", "-t", f"{args.primary_session}:"]
+    if cwd:
+        argv.extend(["-c", cwd])
+    window_id = newmux(args.socket_path, socket_name_arg, *argv).strip()
+    marked = mark_target(args.socket_path, socket_name_arg, run_dir, window_id, args.primary_session)
+    target_index = window_index(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    runtime_event(
+        run_dir,
+        "window.create",
+        window=window_id,
+        target=args.target,
+        cwd=cwd,
+        target_index=target_index,
+        marked=marked,
+    )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "window": window_id,
+                "target_index": target_index,
+                "cwd": cwd,
+                "marked": marked,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -641,6 +785,15 @@ def delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def delete_window(args: argparse.Namespace) -> int:
+    socket_name_arg = socket_name(args.socket_path, args.socket_name)
+    rows = pane_rows(args.socket_path, socket_name_arg, args.target_window)
+    if not rows:
+        raise RuntimeError(f"no panes found for window {args.target_window}")
+    args.target_pane = active_pane_row(rows)["pane"]
+    return delete(args)
+
+
 def stack(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
     items = read_lifo_items(run_dir, include_restored=args.include_restored)
@@ -671,6 +824,8 @@ def restore_latest(args: argparse.Namespace) -> int:
         item,
     )
     sync_workspace_order(args.socket_path, socket_name_arg, run_dir, args.primary_session)
+    target_index = window_index(args.socket_path, socket_name_arg, args.primary_session, window_id)
+    tab_restore = restore_tab_session_windows(args.socket_path, socket_name_arg, run_dir)
     restored.add(int(item["sequence"]))
     write_restored_sequences(run_dir, restored)
     runtime_event(
@@ -680,9 +835,11 @@ def restore_latest(args: argparse.Namespace) -> int:
         window=window_id,
         primary_session=args.primary_session,
         placement=placement,
+        target_index=target_index,
         original_index=item.get("original_index"),
         left_neighbor=item.get("left_neighbor"),
         right_neighbor=item.get("right_neighbor"),
+        tab_session_restore=tab_restore,
     )
     result = {
         "ok": True,
@@ -690,9 +847,39 @@ def restore_latest(args: argparse.Namespace) -> int:
         "sequence": item["sequence"],
         "window": window_id,
         "placement": placement,
+        "target_index": target_index,
     }
     if args.json:
         print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def remember_tab_session(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    mapping = read_tab_session_map(run_dir)
+    mapping[args.tab_session] = args.window_id
+    write_tab_session_map(run_dir, mapping)
+    runtime_event(
+        run_dir,
+        "native_tab_session.remember",
+        session=args.tab_session,
+        window=args.window_id,
+    )
+    if args.json:
+        print(json.dumps({"ok": True, "session": args.tab_session, "window": args.window_id}, sort_keys=True))
+    return 0
+
+
+def restore_tab_sessions(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    result = restore_tab_session_windows(
+        args.socket_path,
+        socket_name(args.socket_path, args.socket_name),
+        run_dir,
+    )
+    runtime_event(run_dir, "native_tab_session.restore", **result)
+    if args.json:
+        print(json.dumps({"ok": True, **result}, sort_keys=True))
     return 0
 
 
@@ -709,6 +896,12 @@ def main() -> int:
     mark_parser.add_argument("--target", required=True)
     mark_parser.add_argument("--workspace", default="newmux")
     mark_parser.set_defaults(func=mark_panes)
+
+    create_parser = subparsers.add_parser("create-window")
+    add_common(create_parser)
+    create_parser.add_argument("--primary-session", default="newmux")
+    create_parser.add_argument("--target")
+    create_parser.set_defaults(func=create_window)
 
     command_parser = subparsers.add_parser("command")
     add_common(command_parser)
@@ -729,6 +922,13 @@ def main() -> int:
     delete_parser.add_argument("--json", action="store_true")
     delete_parser.set_defaults(func=delete)
 
+    delete_window_parser = subparsers.add_parser("delete-window")
+    add_common(delete_window_parser)
+    delete_window_parser.add_argument("--target-window", required=True)
+    delete_window_parser.add_argument("--primary-session", default="newmux")
+    delete_window_parser.add_argument("--json", action="store_true")
+    delete_window_parser.set_defaults(func=delete_window)
+
     stack_parser = subparsers.add_parser("stack")
     add_common(stack_parser)
     stack_parser.add_argument("--include-restored", action="store_true")
@@ -739,6 +939,18 @@ def main() -> int:
     restore_parser.add_argument("--primary-session", default="newmux")
     restore_parser.add_argument("--json", action="store_true")
     restore_parser.set_defaults(func=restore_latest)
+
+    remember_parser = subparsers.add_parser("remember-tab-session")
+    add_common(remember_parser)
+    remember_parser.add_argument("--tab-session", required=True)
+    remember_parser.add_argument("--window-id", required=True)
+    remember_parser.add_argument("--json", action="store_true")
+    remember_parser.set_defaults(func=remember_tab_session)
+
+    restore_tabs_parser = subparsers.add_parser("restore-tab-sessions")
+    add_common(restore_tabs_parser)
+    restore_tabs_parser.add_argument("--json", action="store_true")
+    restore_tabs_parser.set_defaults(func=restore_tab_sessions)
 
     args = parser.parse_args()
     return args.func(args)
