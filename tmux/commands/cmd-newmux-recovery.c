@@ -1292,6 +1292,8 @@ cmd_newmux_create_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	struct spawn_context	 sc = { 0 };
 	struct client		*tc = cmdq_get_target_client(cmdq_item);
 	struct session		*s;
+	struct winlink		*target_wl = target->wl;
+	int			 insertion_idx = -1;
 	struct winlink		*new_wl;
 	char			*cause = NULL, *cwd = NULL;
 
@@ -1303,11 +1305,18 @@ cmd_newmux_create_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	if (cwd == NULL)
 		cwd = xstrdup(server_client_get_cwd(tc, s));
 
+	if (target_wl == NULL || target_wl->session != s) {
+		target_wl = s->curw;
+	}
+	if (target_wl != NULL) {
+		insertion_idx = winlink_shuffle_up(s, target_wl, 0);
+	}
+
 	sc.item = cmdq_item;
 	sc.s = s;
 	sc.tc = tc;
 	sc.environ = environ_create();
-	sc.idx = -1;
+	sc.idx = insertion_idx;
 	sc.cwd = cwd;
 	sc.flags = SPAWN_DETACHED;
 
