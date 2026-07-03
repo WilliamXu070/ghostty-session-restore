@@ -898,8 +898,14 @@ extension Ghostty {
         private static let newmuxTabMutationLock = NSLock()
         private static var newmuxTabMutationInFlight = false
         private static var newmuxTabMutationGeneration: UInt64 = 0
+        private static let newmuxMaximumTabs = 15
         private static let newmuxTabCreateMinimumInterval: TimeInterval = 0.1
         private static var newmuxLastTabCreateTime: TimeInterval = 0
+
+        private static func shouldAcceptNewmuxTabCount(_ surfaceView: SurfaceView) -> Bool {
+            let count = surfaceView.window?.tabGroup?.windows.count ?? 1
+            return count < newmuxMaximumTabs
+        }
 
         private static func shouldAcceptNewmuxTabCreate() -> Bool {
             let now = Date.timeIntervalSinceReferenceDate
@@ -1254,6 +1260,10 @@ extension Ghostty {
                     return true
                 }
 
+                guard shouldAcceptNewmuxTabCount(surfaceView) else {
+                    Ghostty.logger.debug("newmux tab create capped at \(newmuxMaximumTabs)")
+                    return true
+                }
                 guard shouldAcceptNewmuxTabCreate() else {
                     Ghostty.logger.debug("newmux tab create rate-limited")
                     return true
