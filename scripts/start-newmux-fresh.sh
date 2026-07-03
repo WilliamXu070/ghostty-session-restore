@@ -15,6 +15,9 @@ RESTORE_MARKER_TTL_SECONDS=${NEWMUX_RESTORE_MARKER_TTL_SECONDS:-30}
 NEWMUX_TAB_MARKER_WAIT_MS=${NEWMUX_TAB_MARKER_WAIT_MS:-150}
 RESTORE_TRACE_FILE=${NEWMUX_RESTORE_TRACE_FILE:-}
 DIRECT_ATTACH_WINDOW=${NEWMUX_ATTACH_WINDOW:-}
+PENDING_ATTACH_TOKEN=${NEWMUX_ATTACH_PENDING_TOKEN:-}
+PENDING_ATTACH_DIR=${NEWMUX_ATTACH_PENDING_DIR:-}
+PENDING_ATTACH_WAIT_MS=${NEWMUX_ATTACH_PENDING_WAIT_MS:-8000}
 
 trace_now_ms()
 {
@@ -150,6 +153,47 @@ validate_window_id()
 			return 1
 			;;
 	esac
+}
+
+validate_pending_token()
+{
+	token=$1
+	case "$token" in
+		''|*/*|*..*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+wait_for_pending_attach_window()
+{
+	validate_pending_token "$PENDING_ATTACH_TOKEN" || return 1
+	[ -n "$PENDING_ATTACH_DIR" ] || return 1
+	case "$PENDING_ATTACH_WAIT_MS" in
+		''|*[!0-9]*)
+			PENDING_ATTACH_WAIT_MS=8000
+			;;
+	esac
+
+	pending_file="$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.window"
+	cancel_file="$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.cancelled"
+	waited_ms=0
+	while [ "$waited_ms" -lt "$PENDING_ATTACH_WAIT_MS" ]; do
+		[ -f "$cancel_file" ] && return 1
+		if [ -f "$pending_file" ]; then
+			window_id=$(sed -n '1p' "$pending_file" 2>/dev/null || true)
+			if validate_window_id "$window_id"; then
+				printf '%s\n' "$window_id"
+				return 0
+			fi
+		fi
+		sleep 0.02
+		waited_ms=$((waited_ms + 20))
+	done
+	return 1
 }
 
 claim_next_restore_ticket_sequence()
@@ -369,6 +413,16 @@ if [ ! -x "$ROOT/bin/newmux" ]; then
 	trace_restore "build_missing_binary.start"
 	"$ROOT/scripts/build-newmux.sh"
 	trace_restore "build_missing_binary.end"
+fi
+
+if [ "${1:-}" != kill-only ] && [ -n "$PENDING_ATTACH_TOKEN" ]; then
+	trace_restore "pending_attach.start" "token=$PENDING_ATTACH_TOKEN"
+	if TAB_WINDOW=$(wait_for_pending_attach_window); then
+		trace_restore "pending_attach.ok" "window_id=$TAB_WINDOW"
+		attach_native_tab_to_window "$TAB_WINDOW"
+	fi
+	trace_restore "pending_attach.timeout" "token=$PENDING_ATTACH_TOKEN"
+	exit 0
 fi
 
 if [ "${1:-}" != kill-only ] && [ -n "$DIRECT_ATTACH_WINDOW" ]; then

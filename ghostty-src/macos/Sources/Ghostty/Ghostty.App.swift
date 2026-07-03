@@ -880,16 +880,38 @@ extension Ghostty {
             if let root = env["NEWMUX_ROOT"], !root.isEmpty {
                 return root
             }
-            return "/Users/williamxu/Desktop/Projects/newmux"
+            return FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cache/newmux/spotlight-runtime")
+                .path
         }
 
         private static func newmuxPrimarySession() -> String {
             ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux"
         }
 
+        private static func newmuxPendingTabDirectory() -> URL {
+            URL(fileURLWithPath: newmuxRoot())
+                .appendingPathComponent(".local", isDirectory: true)
+                .appendingPathComponent("newmux-pending-tabs", isDirectory: true)
+        }
+
         private static let newmuxTabMutationLock = NSLock()
         private static var newmuxTabMutationInFlight = false
         private static var newmuxTabMutationGeneration: UInt64 = 0
+        private static let newmuxTabCreateMinimumInterval: TimeInterval = 0.1
+        private static var newmuxLastTabCreateTime: TimeInterval = 0
+
+        private static func shouldAcceptNewmuxTabCreate() -> Bool {
+            let now = Date.timeIntervalSinceReferenceDate
+            newmuxTabMutationLock.lock()
+            defer { newmuxTabMutationLock.unlock() }
+
+            if now - newmuxLastTabCreateTime < newmuxTabCreateMinimumInterval {
+                return false
+            }
+            newmuxLastTabCreateTime = now
+            return true
+        }
 
         private static func beginNewmuxTabMutation(_ action: String) -> Bool {
             newmuxTabMutationLock.lock()
@@ -1065,7 +1087,22 @@ extension Ghostty {
                !windowId.isEmpty {
                 return windowId
             }
+            if let controller = surfaceView.window?.windowController as? TerminalController,
+               let windowId = controller.resolvedNewmuxPendingWindowId(),
+               !windowId.isEmpty {
+                return windowId
+            }
             return "@0"
+        }
+
+        private static func newmuxKnownWindowId(from surfaceView: SurfaceView) -> String? {
+            guard let controller = surfaceView.window?.windowController as? TerminalController else {
+                return nil
+            }
+            if let windowId = controller.newmuxWindowId, !windowId.isEmpty {
+                return windowId
+            }
+            return controller.resolvedNewmuxPendingWindowId()
         }
 
         private static func newmuxSurfaceView(from target: ghostty_target_s) -> SurfaceView? {
@@ -1109,30 +1146,86 @@ extension Ghostty {
             )
         }
 
+        private static func postNewmuxPendingTab(
+            surfaceView: SurfaceView,
+            baseConfig: SurfaceConfiguration,
+            token: String,
+            pendingDirectory: URL,
+            insertAt: Int?
+        ) {
+            var userInfo: [String: Any] = [
+                Notification.NewSurfaceConfigKey: baseConfig,
+                Notification.NewmuxTabEnvironmentKey: [
+                    "NEWMUX_ATTACH_PENDING_TOKEN": token,
+                    "NEWMUX_ATTACH_PENDING_DIR": pendingDirectory.path,
+                    "NEWMUX_ATTACH_PENDING_WAIT_MS": "8000",
+                ],
+            ]
+            if let insertAt {
+                userInfo[Notification.NewmuxTabInsertAtKey] = insertAt
+            }
+            NotificationCenter.default.post(
+                name: Notification.ghosttyNewTab,
+                object: surfaceView,
+                userInfo: userInfo
+            )
+        }
+
+        private static func writeNewmuxPendingTab(
+            token: String,
+            pendingDirectory: URL,
+            windowId: String
+        ) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: pendingDirectory,
+                    withIntermediateDirectories: true
+                )
+                let url = pendingDirectory.appendingPathComponent("\(token).window")
+                try "\(windowId)\n".write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                Ghostty.logger.error("newmux pending tab write failed: \(error.localizedDescription)")
+            }
+        }
+
+        private static func newmuxPendingTabCancelled(token: String, pendingDirectory: URL) -> Bool {
+            FileManager.default.fileExists(
+                atPath: pendingDirectory.appendingPathComponent("\(token).cancelled").path
+            )
+        }
+
+        private static func cancelNewmuxPendingTab(token: String, directory: String) {
+            guard !token.isEmpty, !directory.isEmpty, !token.contains("/") else { return }
+            let url = URL(fileURLWithPath: directory).appendingPathComponent("\(token).cancelled")
+            do {
+                try FileManager.default.createDirectory(
+                    at: URL(fileURLWithPath: directory),
+                    withIntermediateDirectories: true
+                )
+                try "1\n".write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                Ghostty.logger.error("newmux pending tab cancel failed: \(error.localizedDescription)")
+            }
+        }
+
         private static func newmuxNewTab(
             _ app: ghostty_app_t,
             target: ghostty_target_s,
             request: ghostty_action_newmux_tab_s
         ) -> Bool {
-            guard beginNewmuxTabMutation("new-tab") else { return true }
-
             switch target.tag {
             case GHOSTTY_TARGET_APP:
                 Ghostty.logger.warning("newmux new tab does nothing with an app target")
-                finishNewmuxTabMutation(settleSeconds: 0)
                 return false
 
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else {
-                    finishNewmuxTabMutation(settleSeconds: 0)
                     return false
                 }
                 guard let surfaceView = self.surfaceView(from: surface) else {
-                    finishNewmuxTabMutation(settleSeconds: 0)
                     return false
                 }
                 guard let appState = self.appState(fromView: surfaceView) else {
-                    finishNewmuxTabMutation(settleSeconds: 0)
                     return false
                 }
                 guard appState.config.windowDecorations else {
@@ -1142,7 +1235,6 @@ extension Ghostty {
                     alert.addButton(withTitle: "OK")
                     alert.alertStyle = .warning
                     _ = alert.runModal()
-                    finishNewmuxTabMutation(settleSeconds: 0)
                     return false
                 }
 
@@ -1159,13 +1251,24 @@ extension Ghostty {
                         windowId: windowId,
                         insertAt: insertAt
                     )
-                    finishNewmuxTabMutation(settleSeconds: 0.03)
                     return true
                 }
 
+                guard shouldAcceptNewmuxTabCreate() else {
+                    Ghostty.logger.debug("newmux tab create rate-limited")
+                    return true
+                }
                 let targetWindowId = newmuxWindowId(from: surfaceView)
                 let insertAt = insertIndexRightOfActiveTab(surfaceView)
-                let generation = currentNewmuxTabGeneration()
+                let pendingDirectory = newmuxPendingTabDirectory()
+                let token = UUID().uuidString
+                postNewmuxPendingTab(
+                    surfaceView: surfaceView,
+                    baseConfig: baseConfig,
+                    token: token,
+                    pendingDirectory: pendingDirectory,
+                    insertAt: insertAt
+                )
                 DispatchQueue.global(qos: .userInitiated).async {
                     let result = runNewmuxCommand([
                         "newmux-create-window",
@@ -1175,18 +1278,19 @@ extension Ghostty {
                     ])
 
                     DispatchQueue.main.async {
-                        defer { finishNewmuxTabMutation(settleSeconds: 0.03) }
                         guard let result,
                               let windowId = result["window"] ?? result["window_id"] else { return }
-                        guard newmuxTabGenerationMatches(generation) else {
+                        guard !newmuxPendingTabCancelled(
+                            token: token,
+                            pendingDirectory: pendingDirectory
+                        ) else {
                             deleteStaleNewmuxWindow(windowId)
                             return
                         }
-                        postNewmuxTab(
-                            surfaceView: surfaceView,
-                            baseConfig: baseConfig,
-                            windowId: windowId,
-                            insertAt: insertAt
+                        writeNewmuxPendingTab(
+                            token: token,
+                            pendingDirectory: pendingDirectory,
+                            windowId: windowId
                         )
                     }
                 }
@@ -1194,7 +1298,6 @@ extension Ghostty {
 
             default:
                 assertionFailure()
-                finishNewmuxTabMutation(settleSeconds: 0)
                 return false
             }
         }
@@ -1296,19 +1399,18 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s
         ) -> Bool {
-            guard beginNewmuxTabMutation("close-tab") else { return true }
-
             guard let surfaceView = newmuxSurfaceView(from: target) else {
-                finishNewmuxTabMutation(settleSeconds: 0)
                 return false
             }
             guard let window = surfaceView.window,
                   (window.tabGroup?.windows.count ?? 0) > 1 else {
-                finishNewmuxTabMutation(settleSeconds: 0.03)
                 return true
             }
-            bumpNewmuxTabGeneration()
-            let windowId = newmuxWindowId(from: surfaceView)
+            let windowId = newmuxKnownWindowId(from: surfaceView)
+            let pendingToken = (surfaceView.window?.windowController as? TerminalController)?
+                .newmuxPendingWindowToken
+            let pendingDirectory = (surfaceView.window?.windowController as? TerminalController)?
+                .newmuxPendingWindowDirectory
             NotificationCenter.default.post(
                 name: .ghosttyCloseTab,
                 object: surfaceView,
@@ -1316,8 +1418,13 @@ extension Ghostty {
                     Notification.NewmuxBackendDeletedKey: true,
                 ]
             )
-            finishNewmuxTabMutation(settleSeconds: 0.01)
 
+            guard let windowId else {
+                if let pendingToken, let pendingDirectory {
+                    cancelNewmuxPendingTab(token: pendingToken, directory: pendingDirectory)
+                }
+                return true
+            }
             DispatchQueue.global(qos: .userInitiated).async {
                 guard let result = runNewmuxCommand([
                     "newmux-delete-window",

@@ -728,13 +728,17 @@ class AppDelegate: NSObject,
             notification.userInfo?[Ghostty.Notification.NewmuxTabEnvironmentKey] as? [String: String]
         ) ?? [:]
 
-        _ = TerminalController.newTab(
+        let controller = TerminalController.newTab(
             ghostty,
             from: window,
             withBaseConfig: config,
             insertAt: insertAt,
             extraEnvironment: extraEnvironment
         )
+        if let token = extraEnvironment["NEWMUX_ATTACH_PENDING_TOKEN"],
+           let directory = extraEnvironment["NEWMUX_ATTACH_PENDING_DIR"] {
+            controller?.bindNewmuxPendingWindow(token: token, directory: directory)
+        }
     }
 
     private func setDockBadge() {

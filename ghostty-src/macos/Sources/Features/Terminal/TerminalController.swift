@@ -61,6 +61,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Newmux backend window represented by this native tab, when launched
     /// through the Newmux-native tab actions.
     private(set) var newmuxWindowId: String?
+    private(set) var newmuxPendingWindowToken: String?
+    private(set) var newmuxPendingWindowDirectory: String?
 
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
@@ -71,6 +73,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          parent: NSWindow? = nil
     ) {
         self.newmuxWindowId = base?.environmentVariables["NEWMUX_ATTACH_WINDOW"]
+        self.newmuxPendingWindowToken = base?.environmentVariables["NEWMUX_ATTACH_PENDING_TOKEN"]
+        self.newmuxPendingWindowDirectory = base?.environmentVariables["NEWMUX_ATTACH_PENDING_DIR"]
 
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
@@ -170,6 +174,40 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let workItem = scheduledWorkItem!
         pendingInitialPresentation = workItem
         DispatchQueue.main.async(execute: workItem)
+    }
+
+    func bindNewmuxPendingWindow(token: String, directory: String) {
+        guard !token.isEmpty, !directory.isEmpty, !token.contains("/") else { return }
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("\(token).window")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                if let text = try? String(contentsOf: url, encoding: .utf8) {
+                    let windowId = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if windowId.hasPrefix("@") {
+                        DispatchQueue.main.async {
+                            self?.newmuxWindowId = windowId
+                            self?.newmuxPendingWindowToken = nil
+                            self?.newmuxPendingWindowDirectory = nil
+                        }
+                        return
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        }
+    }
+
+    func resolvedNewmuxPendingWindowId() -> String? {
+        guard let token = newmuxPendingWindowToken,
+              let directory = newmuxPendingWindowDirectory,
+              !token.isEmpty,
+              !directory.isEmpty,
+              !token.contains("/") else { return nil }
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("\(token).window")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let windowId = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return windowId.hasPrefix("@") ? windowId : nil
     }
 
     // MARK: Base Controller Overrides
