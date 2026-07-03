@@ -1287,7 +1287,7 @@ table_changed:
 	}
 
 	if (KEYC_IS_MOUSE(key) && m->valid && MOUSE_WHEEL(m->b) &&
-	    wme != NULL && window_copy_fast_live_scroll(wp, c, s, wl, m))
+	    window_copy_fast_live_scroll(wp, c, s, wl, m))
 		goto out;
 	flags = c->flags;
 

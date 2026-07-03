@@ -530,17 +530,7 @@ class FlowRunner:
             [
                 "osascript",
                 "-e",
-                (
-                    'tell application "System Events"\n'
-                    f'  set targetProc to first process whose unix id is {self.ghostty_pid}\n'
-                    '  set frontmost of targetProc to true\n'
-                    '  delay 0.25\n'
-                    '  set frontPid to unix id of first process whose frontmost is true\n'
-                    f'  if frontPid is not {self.ghostty_pid} then error '
-                    f'"frontmost pid " & frontPid & " != expected {self.ghostty_pid}"\n'
-                    f'  {key_script}\n'
-                    'end tell'
-                ),
+                self.ghostty_focus_script() + f"  {key_script}\nend tell",
             ],
             check=False,
         )
@@ -550,6 +540,148 @@ class FlowRunner:
                 f"{proc.stderr or proc.stdout}"
             )
         self.event("action.end", action="press_ghostty_shortcut", key=key, modifiers=modifiers)
+
+    def press_ghostty_shortcut_repeat(
+        self,
+        key: str,
+        modifiers: list[str],
+        count: int,
+        interval: float,
+    ) -> None:
+        key_codes = {
+            "t": "17",
+            "w": "13",
+            "d": "2",
+            "left_bracket": "33",
+            "right_bracket": "30",
+        }
+        if key not in key_codes:
+            raise FlowFailure(f"unsupported physical shortcut key: {key}")
+        if count < 1:
+            raise FlowFailure(f"repeat count must be positive: {count}")
+        mods = ", ".join(modifiers)
+        key_script = (
+            f"key code {key_codes[key]} using {{{mods}}}"
+            if mods
+            else f"key code {key_codes[key]}"
+        )
+        self.event(
+            "action.start",
+            action="press_ghostty_shortcut_repeat",
+            key=key,
+            modifiers=modifiers,
+            count=count,
+            interval=interval,
+        )
+        proc = self.run_cmd(
+            [
+                "osascript",
+                "-e",
+                (
+                    self.ghostty_focus_script()
+                    + f"  repeat {count} times\n"
+                    + f"    {key_script}\n"
+                    + f"    delay {interval:.3f}\n"
+                    + "  end repeat\n"
+                    + "end tell"
+                ),
+            ],
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise FlowFailure(
+                f"physical shortcut repeat failed ({proc.returncode}) key={key} "
+                f"modifiers={modifiers}: {proc.stderr or proc.stdout}"
+            )
+        self.event(
+            "action.end",
+            action="press_ghostty_shortcut_repeat",
+            key=key,
+            modifiers=modifiers,
+            count=count,
+            interval=interval,
+        )
+
+    def perform_ghostty_action(self, action_name: str) -> None:
+        self.event("action.start", action="perform_ghostty_action", name=action_name)
+        proc = self.run_cmd(
+            [
+                "osascript",
+                "-e",
+                (
+                    'tell application "Ghostty"\n'
+                    "  set targetTerminal to focused terminal of selected tab of front window\n"
+                    f'  perform action "{action_name}" on targetTerminal\n'
+                    "end tell"
+                ),
+            ],
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise FlowFailure(
+                f"Ghostty action failed ({proc.returncode}) action={action_name}: "
+                f"{proc.stderr or proc.stdout}"
+            )
+        self.event("action.end", action="perform_ghostty_action", name=action_name)
+
+    def perform_ghostty_action_burst(self, action_name: str, count: int, interval: float) -> None:
+        if count < 1:
+            raise FlowFailure(f"action burst count must be positive: {count}")
+        self.event(
+            "action.start",
+            action="perform_ghostty_action_burst",
+            name=action_name,
+            count=count,
+            interval=interval,
+        )
+        proc = self.run_cmd(
+            [
+                "osascript",
+                "-e",
+                (
+                    'tell application "Ghostty"\n'
+                    f"  repeat {count} times\n"
+                    "    set targetTerminal to focused terminal of selected tab of front window\n"
+                    f'    perform action "{action_name}" on targetTerminal\n'
+                    f"    delay {interval:.3f}\n"
+                    "  end repeat\n"
+                    "end tell"
+                ),
+            ],
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise FlowFailure(
+                f"Ghostty action burst failed ({proc.returncode}) action={action_name}: "
+                f"{proc.stderr or proc.stdout}"
+            )
+        self.event(
+            "action.end",
+            action="perform_ghostty_action_burst",
+            name=action_name,
+            count=count,
+            interval=interval,
+        )
+
+    def ghostty_focus_script(self) -> str:
+        if self.ghostty_pid is None:
+            raise FlowFailure("Ghostty PID is unavailable before physical shortcut")
+        return (
+            'tell application "Ghostty" to activate\n'
+            'tell application "System Events"\n'
+            f'  set targetPid to {self.ghostty_pid}\n'
+            "  repeat 12 times\n"
+            "    try\n"
+            "      set targetProc to first process whose unix id is targetPid\n"
+            "      set frontmost of targetProc to true\n"
+            "    end try\n"
+            "    delay 0.10\n"
+            "    set frontPid to unix id of first process whose frontmost is true\n"
+            "    if frontPid is targetPid then exit repeat\n"
+            "  end repeat\n"
+            "  set frontPid to unix id of first process whose frontmost is true\n"
+            '  if frontPid is not targetPid then error "frontmost pid " & frontPid & " != expected " & targetPid\n'
+        )
 
     def send_keys(self, from_state: str, keys: list[str], target: str = "primary_active") -> None:
         pane_id = self.choose_target_pane(from_state, target)
@@ -617,6 +749,21 @@ class FlowRunner:
                     str(step["key"]),
                     [str(modifier) for modifier in step.get("modifiers", [])],
                 )
+            elif action == "physical_shortcut_repeat":
+                self.press_ghostty_shortcut_repeat(
+                    str(step["key"]),
+                    [str(modifier) for modifier in step.get("modifiers", [])],
+                    int(step.get("count", 1)),
+                    float(step.get("interval", 0.05)),
+                )
+            elif action == "ghostty_action":
+                self.perform_ghostty_action(str(step["action"]))
+            elif action == "ghostty_action_burst":
+                self.perform_ghostty_action_burst(
+                    str(step["action"]),
+                    int(step.get("count", 1)),
+                    float(step.get("interval", 0.05)),
+                )
             elif action == "send_keys":
                 self.send_keys(
                     step.get("from", "before"),
@@ -640,9 +787,14 @@ class FlowRunner:
             labels = {
                 "workspaces": "workspaces",
                 "windows": "windows",
+                "windows_min": "windows",
+                "windows_max": "windows",
                 "panes": "panes",
+                "panes_min": "panes",
+                "panes_max": "panes",
                 "raw_sessions": "raw_sessions",
                 "raw_sessions_min": "raw_sessions",
+                "raw_sessions_max": "raw_sessions",
                 "lifo": "lifo",
                 "dirty_windows": "dirty_windows",
                 "dirty_panes": "dirty_panes",
@@ -652,7 +804,12 @@ class FlowRunner:
                     continue
                 actual = derived[field]
                 expected = expectation[key]
-                ok = actual >= expected if key.endswith("_min") else actual == expected
+                if key.endswith("_min"):
+                    ok = actual >= expected
+                elif key.endswith("_max"):
+                    ok = actual <= expected
+                else:
+                    ok = actual == expected
                 if not ok:
                     raise FlowFailure(
                         f"{name}.{key} expected {expected}, got {actual}; "
@@ -675,7 +832,11 @@ class FlowRunner:
             derived = self.ui_states[name]["derived"]
             labels = {
                 "native_tabs": "native_tabs",
+                "native_tabs_min": "native_tabs",
+                "native_tabs_max": "native_tabs",
                 "rail_tabs": "rail_tabs",
+                "rail_tabs_min": "rail_tabs",
+                "rail_tabs_max": "rail_tabs",
                 "ui_enabled": "ui_enabled",
                 "status_enabled": "status_enabled",
                 "active_native_tab_index": "active_native_tab_index",
@@ -685,7 +846,13 @@ class FlowRunner:
                     continue
                 actual = derived[field]
                 expected = expectation[key]
-                if actual != expected:
+                if key.endswith("_min"):
+                    ok = actual >= expected
+                elif key.endswith("_max"):
+                    ok = actual <= expected
+                else:
+                    ok = actual == expected
+                if not ok:
                     raise FlowFailure(
                         f"{name}.{key} expected {expected}, got {actual}; "
                         f"derived={json.dumps(derived, sort_keys=True)}"

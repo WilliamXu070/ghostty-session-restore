@@ -128,6 +128,10 @@ def find_ghostty_pid() -> int:
     return max(pids)
 
 
+def apple_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def focus_pid(pid: int) -> None:
     run([
         "osascript",
@@ -162,6 +166,81 @@ def press(pid: int, key_code: int, modifiers: list[str]) -> float:
     return (now() - start) * 1000
 
 
+def perform_action(action: str) -> float:
+    start = now()
+    run([
+        "osascript",
+        "-e",
+        (
+            'tell application "Ghostty"\n'
+            "  set targetTerminal to focused terminal of selected tab of front window\n"
+            f'  perform action "{apple_string(action)}" on targetTerminal\n'
+            "end tell"
+        ),
+    ])
+    return (now() - start) * 1000
+
+
+def perform_action_burst(action: str, count: int, interval: float) -> float:
+    delay_line = f"    delay {interval:.3f}\n" if interval > 0 else ""
+    start = now()
+    run([
+        "osascript",
+        "-e",
+        (
+            'tell application "Ghostty"\n'
+            f"  repeat {count} times\n"
+            "    set targetTerminal to focused terminal of selected tab of front window\n"
+            f'    perform action "{apple_string(action)}" on targetTerminal\n'
+            f"{delay_line}"
+            "  end repeat\n"
+            "end tell"
+        ),
+    ])
+    return (now() - start) * 1000
+
+
+def trigger(pid: int, driver: str, key_code: int, modifiers: list[str], action: str) -> float:
+    if driver == "action":
+        return perform_action(action)
+    return press(pid, key_code, modifiers)
+
+
+def type_line(pid: int, text: str) -> float:
+    escaped = apple_string(text)
+    start = now()
+    run([
+        "osascript",
+        "-e",
+        (
+            'tell application "System Events"\n'
+            f'  set targetProc to first process whose unix id is {pid}\n'
+            '  set frontmost of targetProc to true\n'
+            '  set frontPid to unix id of first process whose frontmost is true\n'
+            f'  if frontPid is not {pid} then error "frontmost pid mismatch"\n'
+            f'  keystroke "{escaped}"\n'
+            '  key code 36\n'
+            'end tell'
+        ),
+    ])
+    return (now() - start) * 1000
+
+
+def input_text(text: str) -> float:
+    start = now()
+    run([
+        "osascript",
+        "-e",
+        (
+            'tell application "Ghostty"\n'
+            "  set targetTerminal to focused terminal of selected tab of front window\n"
+            f'  input text "{apple_string(text)}" & return to targetTerminal\n'
+            "end tell"
+        ),
+    ])
+    return (now() - start) * 1000
+
+
 def newmux(*args: str) -> str:
     return run([str(NEWMUX), "-S", socket_path(), *args]).stdout
 
@@ -188,7 +267,7 @@ def mark_dirty(pane_id: str) -> None:
     )
 
 
-def launch(timeout: float) -> tuple[int, float]:
+def launch(timeout: float, *, focus: bool) -> tuple[int, float]:
     start = now()
     run([str(ROOT / "scripts" / "open-newmux-ghostty.sh")])
 
@@ -204,7 +283,8 @@ def launch(timeout: float) -> tuple[int, float]:
     wait_for("initial attached client", ready, timeout)
     elapsed = (now() - start) * 1000
     pid = find_ghostty_pid()
-    focus_pid(pid)
+    if focus:
+        focus_pid(pid)
     return pid, elapsed
 
 
@@ -218,12 +298,12 @@ def pane_for_window(state: dict[str, Any], window_id: str) -> dict[str, Any]:
     return panes[0]
 
 
-def measure_cmd_t(pid: int, timeout: float, *, run_first_command: bool = False) -> dict[str, Any]:
+def measure_cmd_t(pid: int, timeout: float, driver: str, *, run_first_command: bool = False) -> dict[str, Any]:
     before = snapshot()
     before_counts = counts(before)
     before_tabs = native_tab_count()
     before_windows = {w["id"] for w in visible_windows(before)}
-    send_ms = press(pid, 17, ["command down"])
+    send_ms = trigger(pid, driver, 17, ["command down"], "newmux_new_tab")
 
     def appeared() -> bool:
         state = snapshot()
@@ -257,11 +337,11 @@ def measure_cmd_t(pid: int, timeout: float, *, run_first_command: bool = False) 
     }
 
 
-def measure_cmd_w(pid: int, timeout: float) -> dict[str, Any]:
+def measure_cmd_w(pid: int, timeout: float, driver: str) -> dict[str, Any]:
     before = snapshot()
     before_counts = counts(before)
     before_tabs = native_tab_count()
-    send_ms = press(pid, 13, ["command down"])
+    send_ms = trigger(pid, driver, 13, ["command down"], "newmux_close_tab")
 
     def disappeared() -> bool:
         state = snapshot()
@@ -274,13 +354,13 @@ def measure_cmd_w(pid: int, timeout: float) -> dict[str, Any]:
     return {"send_ms": send_ms, "visible_ms": state_ms}
 
 
-def measure_dirty_delete_recover(pid: int, timeout: float) -> dict[str, Any]:
-    new_tab = measure_cmd_t(pid, timeout, run_first_command=True)
+def measure_dirty_delete_recover(pid: int, timeout: float, driver: str) -> dict[str, Any]:
+    new_tab = measure_cmd_t(pid, timeout, driver, run_first_command=True)
     mark_dirty(new_tab["pane"])
     before_delete = snapshot()
     before_counts = counts(before_delete)
     before_tabs = native_tab_count()
-    delete_send_ms = press(pid, 13, ["command down"])
+    delete_send_ms = trigger(pid, driver, 13, ["command down"], "newmux_close_tab")
 
     def soft_deleted() -> bool:
         state = snapshot()
@@ -294,7 +374,7 @@ def measure_dirty_delete_recover(pid: int, timeout: float) -> dict[str, Any]:
     before_restore = snapshot()
     before_restore_counts = counts(before_restore)
     before_restore_tabs = native_tab_count()
-    restore_send_ms = press(pid, 17, ["command down", "shift down"])
+    restore_send_ms = trigger(pid, driver, 17, ["command down", "shift down"], "newmux_restore_tab")
 
     def restored() -> bool:
         state = snapshot()
@@ -305,12 +385,82 @@ def measure_dirty_delete_recover(pid: int, timeout: float) -> dict[str, Any]:
         return ok_backend and ok_ui
 
     restore_visible_ms = wait_for("Cmd+Shift+T restore", restored, timeout)
+    restore_input_marker = f"NEWMUX_BENCH_RESTORED_INPUT_{uuid.uuid4().hex[:8]}"
+    if driver == "action":
+        restore_input_send_ms = input_text(f"printf {restore_input_marker}")
+    else:
+        restore_input_send_ms = type_line(pid, f"printf {restore_input_marker}")
+    restore_input_ready_ms = wait_for(
+        "restored tab accepts real UI input",
+        lambda: restore_input_marker in newmux("capture-pane", "-p", "-J", "-t", new_tab["pane"]),
+        timeout=3,
+    )
     return {
         "new_tab": new_tab,
         "delete_send_ms": delete_send_ms,
         "delete_visible_ms": delete_visible_ms,
         "restore_send_ms": restore_send_ms,
         "restore_visible_ms": restore_visible_ms,
+        "restore_input_send_ms": restore_input_send_ms,
+        "restore_input_ready_ms": restore_input_ready_ms,
+    }
+
+
+def quiet_counts(
+    timeout: float,
+    stable_for: float = 0.35,
+    *,
+    expected_windows: int | None = None,
+    max_native_tabs: int | None = None,
+) -> float:
+    start = now()
+    deadline = start + timeout
+    last: tuple[int, int | None] | None = None
+    last_change = start
+    while now() < deadline:
+        current = (counts(snapshot())["windows"], native_tab_count())
+        matches = True
+        if expected_windows is not None and current[0] != expected_windows:
+            matches = False
+        if max_native_tabs is not None and current[1] is not None and current[1] > max_native_tabs:
+            matches = False
+        if current != last:
+            last = current
+            last_change = now()
+        elif matches and now() - last_change >= stable_for:
+            return (now() - start) * 1000
+        time.sleep(0.03)
+    raise RuntimeError("timed out waiting for quiet tab counts")
+
+
+def measure_hold_bursts(timeout: float, *, interval: float) -> dict[str, Any]:
+    start_windows = counts(snapshot())["windows"]
+    cmd_t_send_ms = perform_action_burst("newmux_new_tab", 18, interval)
+    cmd_t_quiet_ms = quiet_counts(timeout)
+    after_t = counts(snapshot())["windows"]
+    after_t_tabs = native_tab_count()
+
+    cmd_w_send_ms = perform_action_burst("newmux_close_tab", 48, interval)
+
+    def back_to_one() -> bool:
+        status_tabs = native_tab_count()
+        current = counts(snapshot())["windows"]
+        ok_backend = current <= 1
+        ok_ui = status_tabs is None or status_tabs <= 1
+        return ok_backend and ok_ui
+
+    cmd_w_to_one_ms = wait_for("held Cmd+W back to one tab", back_to_one, timeout)
+    cmd_w_quiet_ms = quiet_counts(timeout, expected_windows=1, max_native_tabs=1)
+    return {
+        "start_windows": start_windows,
+        "after_cmd_t_windows": after_t,
+        "after_cmd_t_native_tabs": after_t_tabs,
+        "burst_interval_ms": interval * 1000,
+        "cmd_t_send_ms": cmd_t_send_ms,
+        "cmd_t_quiet_ms": cmd_t_quiet_ms,
+        "cmd_w_send_ms": cmd_w_send_ms,
+        "cmd_w_to_one_ms": cmd_w_to_one_ms,
+        "cmd_w_quiet_ms": cmd_w_quiet_ms,
     }
 
 
@@ -330,23 +480,27 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--passes", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=8.0)
+    parser.add_argument("--driver", choices=["action", "physical"], default="action")
+    parser.add_argument("--burst-interval", type=float, default=0.0)
     parser.add_argument("--out", default=str(ROOT / ".local" / "benchmarks" / "newmux-lifecycle-latest.json"))
     args = parser.parse_args()
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pid, startup_ms = launch(args.timeout)
+    pid, startup_ms = launch(args.timeout, focus=args.driver == "physical")
     runs: list[dict[str, Any]] = []
     for index in range(1, args.passes + 1):
-        clean_new = measure_cmd_t(pid, args.timeout)
-        clean_delete = measure_cmd_w(pid, args.timeout)
-        dirty_cycle = measure_dirty_delete_recover(pid, args.timeout)
+        clean_new = measure_cmd_t(pid, args.timeout, args.driver)
+        clean_delete = measure_cmd_w(pid, args.timeout, args.driver)
+        dirty_cycle = measure_dirty_delete_recover(pid, args.timeout, args.driver)
+        hold_bursts = measure_hold_bursts(args.timeout, interval=args.burst_interval)
         runs.append({
             "pass": index,
             "clean_cmd_t": clean_new,
             "clean_cmd_w": clean_delete,
             "dirty_delete_recover": dirty_cycle,
+            "hold_bursts": hold_bursts,
         })
 
     result = {
@@ -364,6 +518,12 @@ def main() -> int:
             "clean_cmd_w_visible": summarize([r["clean_cmd_w"]["visible_ms"] for r in runs]),
             "dirty_cmd_w_visible": summarize([r["dirty_delete_recover"]["delete_visible_ms"] for r in runs]),
             "cmd_shift_t_restore_visible": summarize([r["dirty_delete_recover"]["restore_visible_ms"] for r in runs]),
+            "cmd_shift_t_restore_real_input": summarize([r["dirty_delete_recover"]["restore_input_ready_ms"] for r in runs]),
+            "held_cmd_t_send": summarize([r["hold_bursts"]["cmd_t_send_ms"] for r in runs]),
+            "held_cmd_t_quiet": summarize([r["hold_bursts"]["cmd_t_quiet_ms"] for r in runs]),
+            "held_cmd_w_send": summarize([r["hold_bursts"]["cmd_w_send_ms"] for r in runs]),
+            "held_cmd_w_to_one": summarize([r["hold_bursts"]["cmd_w_to_one_ms"] for r in runs]),
+            "held_cmd_w_quiet": summarize([r["hold_bursts"]["cmd_w_quiet_ms"] for r in runs]),
         },
         "final": {
             "snapshot_counts": counts(snapshot()),

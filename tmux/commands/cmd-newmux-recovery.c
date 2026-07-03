@@ -35,6 +35,9 @@ struct newmux_closed_item {
 	u_int			 window_id;
 	char			*window_name;
 	int			 window_index;
+	int			 window_position;
+	int			 left_window_id;
+	int			 right_window_id;
 	char			*window_layout;
 	u_int			 pane_id;
 	u_int			 pane_index;
@@ -251,6 +254,53 @@ newmux_window_position(struct session *s, struct window *w)
 		position++;
 	}
 	return (position);
+}
+
+static struct winlink *
+newmux_winlink_at_position(struct session *s, u_int position)
+{
+	struct winlink	*wl;
+	u_int		 current = 0;
+
+	RB_FOREACH(wl, winlinks, &s->windows) {
+		if (current == position)
+			return (wl);
+		current++;
+	}
+	return (NULL);
+}
+
+static void
+newmux_item_set_window_order(struct newmux_closed_item *item,
+    struct session *s, struct winlink *wl)
+{
+	struct winlink	*left, *right;
+
+	item->window_position = (int)newmux_window_position(s, wl->window);
+	left = RB_PREV(winlinks, &s->windows, wl);
+	right = RB_NEXT(winlinks, &s->windows, wl);
+	item->left_window_id = left != NULL ? (int)left->window->id : -1;
+	item->right_window_id = right != NULL ? (int)right->window->id : -1;
+}
+
+static char *
+newmux_window_order_string(struct newmux_closed_item *item)
+{
+	char	*left, *right, *result;
+
+	if (item->left_window_id >= 0)
+		xasprintf(&left, "@%u", (u_int)item->left_window_id);
+	else
+		left = xstrdup("none");
+	if (item->right_window_id >= 0)
+		xasprintf(&right, "@%u", (u_int)item->right_window_id);
+	else
+		right = xstrdup("none");
+	xasprintf(&result, "target_position=%d left_window_id=%s "
+	    "right_window_id=%s", item->window_position, left, right);
+	free(left);
+	free(right);
+	return (result);
 }
 
 static void
@@ -644,6 +694,62 @@ newmux_session_attach_at_original_index(struct session *s, struct window *w,
 	return (newmux_session_attach_silent(s, w, idx, cause));
 }
 
+static struct winlink *
+newmux_session_attach_at_saved_position(struct session *s, struct window *w,
+    struct newmux_closed_item *item, char **cause)
+{
+	struct window	*neighbor_w;
+	struct winlink	*neighbor_wl;
+	int		 idx;
+
+	if (item->left_window_id >= 0) {
+		neighbor_w = window_find_by_id((u_int)item->left_window_id);
+		neighbor_wl = neighbor_w != NULL ?
+		    winlink_find_by_window(&s->windows, neighbor_w) : NULL;
+		if (neighbor_wl != NULL) {
+			idx = winlink_shuffle_up(s, neighbor_wl, 0);
+			if (idx == -1) {
+				xasprintf(cause, "index in use after window: @%u",
+				    (u_int)item->left_window_id);
+				return (NULL);
+			}
+			return (newmux_session_attach_silent(s, w, idx, cause));
+		}
+	}
+
+	if (item->right_window_id >= 0) {
+		neighbor_w = window_find_by_id((u_int)item->right_window_id);
+		neighbor_wl = neighbor_w != NULL ?
+		    winlink_find_by_window(&s->windows, neighbor_w) : NULL;
+		if (neighbor_wl != NULL) {
+			idx = winlink_shuffle_up(s, neighbor_wl, 1);
+			if (idx == -1) {
+				xasprintf(cause, "index in use before window: @%u",
+				    (u_int)item->right_window_id);
+				return (NULL);
+			}
+			return (newmux_session_attach_silent(s, w, idx, cause));
+		}
+	}
+
+	if (item->window_position >= 0) {
+		neighbor_wl = newmux_winlink_at_position(s,
+		    (u_int)item->window_position);
+		if (neighbor_wl == NULL)
+			return (newmux_session_attach_silent(s, w, -1, cause));
+		idx = winlink_shuffle_up(s, neighbor_wl, 1);
+		if (idx == -1) {
+			xasprintf(cause, "index in use at position: %d",
+			    item->window_position);
+			return (NULL);
+		}
+		return (newmux_session_attach_silent(s, w, idx, cause));
+	}
+
+	return (newmux_session_attach_at_original_index(s, w,
+	    item->window_index, cause));
+}
+
 static int
 newmux_pane_current_command_is_shell(struct window_pane *wp)
 {
@@ -799,6 +905,7 @@ newmux_item_from_pane(struct session *s, struct winlink *wl,
 	item->window_id = wl->window->id;
 	item->window_name = xstrdup(wl->window->name);
 	item->window_index = wl->idx;
+	newmux_item_set_window_order(item, s, wl);
 	item->window_layout = newmux_dump_window_layout(wl->window);
 	item->pane_id = wp->id;
 	if (window_pane_index(wp, &item->pane_index) != 0)
@@ -824,6 +931,7 @@ newmux_item_from_window(struct session *s, struct winlink *wl)
 	item->window_id = wl->window->id;
 	item->window_name = xstrdup(wl->window->name);
 	item->window_index = wl->idx;
+	newmux_item_set_window_order(item, s, wl);
 	item->window_layout = newmux_dump_window_layout(wl->window);
 	if (window_pane_index(wl->window->active,
 	    &item->active_pane_index) != 0)
@@ -1083,8 +1191,8 @@ newmux_restore_live_window(struct cmdq_item *cmdq_item,
 	}
 
 	newmux_history_snapshots_take(w, &snapshots);
-	dst_wl = newmux_session_attach_at_original_index(dst_s, w,
-	    item->window_index, &cause);
+	dst_wl = newmux_session_attach_at_saved_position(dst_s, w, item,
+	    &cause);
 	if (dst_wl == NULL) {
 		cmdq_error(cmdq_item, "%s", cause);
 		free(cause);
@@ -1232,6 +1340,7 @@ cmd_newmux_delete_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	struct window			*w;
 	struct newmux_closed_item	*item;
 	struct client			*tc = cmdq_get_target_client(cmdq_item);
+	char				*order;
 	int				 print = args_has(args, 'P');
 
 	if (target->wl == NULL)
@@ -1269,13 +1378,14 @@ cmd_newmux_delete_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	}
 	newmux_stack_push(item);
 	if (print) {
+		order = newmux_window_order_string(item);
 		cmdq_print(cmdq_item,
 		    "ok=1 action=delete kind=window mode=soft soft=1 "
 		    "sequence=%u window=@%u window_id=@%u "
-		    "window_index=%d target_index=%u live=1",
+		    "window_index=%d target_index=%d %s live=1",
 		    item->sequence, item->window_id, item->window_id,
-		    item->window_index, item->window_index >= 0 ?
-		    (u_int)item->window_index : 0);
+		    item->window_index, item->window_position, order);
+		free(order);
 	}
 	return (CMD_RETURN_NORMAL);
 }
@@ -1288,13 +1398,14 @@ newmux_print_closed_item(struct cmdq_item *cmdq_item,
 	struct session	*s;
 	struct window	*w;
 	struct winlink	*wl = NULL;
+	char		*order;
 	int		 window_index;
-	u_int		 target_index;
+	int		 target_index;
 
 	reserved_field = reserved ? " reserved=1" : "";
 	restored_field = reserved ? " restored=0" : " restored=1";
 	window_index = item->window_index;
-	target_index = item->window_index >= 0 ? (u_int)item->window_index : 0;
+	target_index = item->window_position;
 	s = session_find_by_id(item->session_id);
 	w = window_find_by_id(item->window_id);
 	if (s != NULL && w != NULL) {
@@ -1304,28 +1415,30 @@ newmux_print_closed_item(struct cmdq_item *cmdq_item,
 			target_index = newmux_window_position(s, w);
 		}
 	}
+	order = newmux_window_order_string(item);
 
 	if (item->type == NEWMUX_CLOSED_PANE) {
 		cmdq_print(cmdq_item,
 		    "ok=1 kind=pane sequence=%u window=@%u "
 		    "window_id=@%u pane_id=%%%u window_index=%d "
-		    "target_index=%u live=1%s%s",
+		    "target_index=%d %s live=1%s%s",
 		    item->sequence, item->window_id, item->window_id,
 		    item->pane_id, window_index, target_index,
-		    reserved_field, restored_field);
+		    order, reserved_field, restored_field);
 	} else if (item->type == NEWMUX_CLOSED_WINDOW) {
 		cmdq_print(cmdq_item,
 		    "ok=1 kind=window sequence=%u window=@%u "
-		    "window_id=@%u window_index=%d target_index=%u "
+		    "window_id=@%u window_index=%d target_index=%d %s "
 		    "live=1%s%s",
 		    item->sequence, item->window_id, item->window_id,
-		    window_index, target_index, reserved_field,
+		    window_index, target_index, order, reserved_field,
 		    restored_field);
 	} else {
 		cmdq_print(cmdq_item,
 		    "ok=1 kind=session sequence=%u live=1%s%s",
 		    item->sequence, reserved_field, restored_field);
 	}
+	free(order);
 }
 
 static int

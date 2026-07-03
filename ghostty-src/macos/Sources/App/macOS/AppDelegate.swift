@@ -953,6 +953,12 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
+        if ghostty.config.keyboardShortcut(for: "newmux_new_tab") != nil,
+           let surface = TerminalController.preferredParent?.focusedSurface?.surface {
+            ghostty.newmuxNewTab(surface: surface)
+            return
+        }
+
         _ = TerminalController.newTab(
             ghostty,
             from: TerminalController.preferredParent?.window

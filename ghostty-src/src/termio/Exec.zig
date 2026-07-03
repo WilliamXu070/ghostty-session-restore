@@ -1433,6 +1433,8 @@ fn execCommand(
             if (value.len != 0 and !std.mem.eql(u8, value, "0"))
                 break :darwin;
         }
+        if (newmuxCommandSkipsDarwinLogin(command))
+            break :darwin;
 
         const passwd = passwdpkg.get(alloc) catch |err| {
             log.warn("failed to read passwd, not using a login shell err={}", .{err});
@@ -1607,6 +1609,18 @@ fn execCommand(
             try args.append(alloc, v);
             break :shell try args.toOwnedSlice(alloc);
         },
+    };
+}
+
+fn newmuxCommandSkipsDarwinLogin(command: configpkg.Command) bool {
+    return switch (command) {
+        .direct => |argv| direct: {
+            if (argv.len == 0) break :direct false;
+            const exe = argv[0];
+            break :direct std.mem.endsWith(u8, exe, "/scripts/start-newmux-fresh.sh") or
+                std.mem.endsWith(u8, exe, "/bin/newmux");
+        },
+        .shell => false,
     };
 }
 

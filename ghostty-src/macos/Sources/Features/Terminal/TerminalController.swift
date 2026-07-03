@@ -1318,10 +1318,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func newTab(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
+        if ghostty.config.keyboardShortcut(for: "newmux_new_tab") != nil {
+            ghostty.newmuxNewTab(surface: surface)
+            return
+        }
         ghostty.newTab(surface: surface)
     }
 
     @IBAction func closeTab(_ sender: Any?) {
+        if ghostty.config.keyboardShortcut(for: "newmux_close_tab") != nil,
+           let surface = focusedSurface?.surface {
+            ghostty.newmuxCloseTab(surface: surface)
+            return
+        }
+
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {
             closeWindow(sender)
@@ -1596,6 +1606,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @objc private func onCloseTab(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }
+        if notification.userInfo?[Ghostty.Notification.NewmuxBackendDeletedKey] as? Bool == true {
+            closeTabImmediately(registerRedo: false)
+            return
+        }
         closeTab(self)
     }
 

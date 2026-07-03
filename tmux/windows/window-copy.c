@@ -375,6 +375,7 @@ struct window_copy_mode_data {
 	int		 wheel_emit_valid;
 	struct timeval	 wheel_emit_time;
 	int		 wheel_direction;
+	u_int		 wheel_emit_count;
 	u_int		 wheel_pending_milli;
 	struct event	 wheel_timer;
 
@@ -2436,11 +2437,11 @@ window_copy_cmd_scroll_exit_toggle(struct window_copy_cmd_state *cs)
 #define NEWMUX_WHEEL_RESET_US 120000
 #define NEWMUX_WHEEL_FRAME_US 8333
 #define NEWMUX_WHEEL_SENSITIVITY_MILLI 2500
-#define NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND 900
-#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND 840
-#define NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK 48
-#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK 44
-#define NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK 2
+#define NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND 640
+#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND 560
+#define NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK 8
+#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK 8
+#define NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK 1
 #define NEWMUX_WHEEL_MODE_SMOOTH 1
 #define NEWMUX_WHEEL_MODE_SINGLE_LINE 2
 
@@ -2449,6 +2450,37 @@ window_copy_time_diff_us(struct timeval *now, struct timeval *then)
 {
 	return ((long long)(now->tv_sec - then->tv_sec) * 1000000LL +
 	    now->tv_usec - then->tv_usec);
+}
+
+static void
+window_copy_wheel_reset(struct window_copy_mode_data *data, int direction,
+    struct timeval *now, int emit_valid)
+{
+	evtimer_del(&data->wheel_timer);
+	data->wheel_direction = direction;
+	data->wheel_pending_milli = 0;
+	data->wheel_emit_count = 0;
+	data->wheel_last_time = *now;
+	data->wheel_emit_time = *now;
+	data->wheel_emit_valid = emit_valid;
+}
+
+static u_int
+window_copy_wheel_ramp_cap(struct window_copy_mode_data *data, u_int step_cap)
+{
+	u_int	ramp_cap;
+
+	if (data->wheel_emit_count < 3)
+		ramp_cap = 1;
+	else if (data->wheel_emit_count < 7)
+		ramp_cap = 2;
+	else if (data->wheel_emit_count < 12)
+		ramp_cap = 4;
+	else
+		ramp_cap = 8;
+	if (step_cap > ramp_cap)
+		step_cap = ramp_cap;
+	return (step_cap);
 }
 
 static void
@@ -2480,7 +2512,7 @@ window_copy_wheel_next_step(struct window_copy_mode_data *data, int direction,
 
 	window_copy_wheel_limits(direction, &max_lines_per_second,
 	    &max_lines_per_tick);
-	step_cap = max_lines_per_tick;
+	step_cap = window_copy_wheel_ramp_cap(data, max_lines_per_tick);
 	if (data->screen.sel != NULL &&
 	    step_cap > NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK)
 		step_cap = NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK;
@@ -2507,6 +2539,8 @@ window_copy_wheel_consume_step(struct window_copy_mode_data *data,
 	data->wheel_pending_milli -= step * 1000;
 	if (data->wheel_pending_milli > max_lines_per_tick * 1000)
 		data->wheel_pending_milli = max_lines_per_tick * 1000;
+	if (data->wheel_emit_count != UINT_MAX)
+		data->wheel_emit_count++;
 	data->wheel_emit_valid = 1;
 	data->wheel_emit_time = *now;
 }
@@ -2608,23 +2642,14 @@ window_copy_wheel_prefix_single_line(struct window_copy_cmd_state *cs)
 
 	if (!data->wheel_last_valid) {
 		data->wheel_last_valid = 1;
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = 1;
+		window_copy_wheel_reset(data, direction, &now, 1);
 		return (1);
 	}
 
 	since_last = window_copy_time_diff_us(&now, &data->wheel_last_time);
 	if (direction != data->wheel_direction ||
 	    since_last > NEWMUX_WHEEL_RESET_US || since_last < 0) {
-		evtimer_del(&data->wheel_timer);
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = 1;
+		window_copy_wheel_reset(data, direction, &now, 1);
 		return (1);
 	}
 
@@ -2673,11 +2698,8 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 
 	if (!data->wheel_last_valid) {
 		data->wheel_last_valid = 1;
-		data->wheel_emit_valid = !m->newmux_scroll_valid;
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
+		window_copy_wheel_reset(data, direction, &now,
+		    !m->newmux_scroll_valid);
 		if (!m->newmux_scroll_valid)
 			return (1);
 	}
@@ -2685,12 +2707,8 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 	since_last = window_copy_time_diff_us(&now, &data->wheel_last_time);
 	if (direction != data->wheel_direction ||
 	    since_last > NEWMUX_WHEEL_RESET_US || since_last < 0) {
-		evtimer_del(&data->wheel_timer);
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = !m->newmux_scroll_valid;
+		window_copy_wheel_reset(data, direction, &now,
+		    !m->newmux_scroll_valid);
 		if (!m->newmux_scroll_valid)
 			return (1);
 	}
@@ -4126,14 +4144,35 @@ window_copy_fast_live_scroll(struct window_pane *wp, struct client *c,
 	struct window_copy_mode_data	*data;
 	struct window_copy_cmd_state	 cs;
 	enum window_copy_cmd_action	 action;
+	struct args			*args;
+	int				 entered = 0;
 
 	if (wp == NULL || m == NULL || !m->valid || !MOUSE_WHEEL(m->b))
 		return (0);
 	wme = TAILQ_FIRST(&wp->modes);
+	if (wme == NULL && m->newmux_scroll_valid &&
+	    MOUSE_BUTTONS(m->b) == MOUSE_WHEEL_UP &&
+	    screen_hsize(&wp->base) != 0) {
+		args = args_create();
+		args_set(args, 'L', NULL, 0);
+		args_set(args, 'H', NULL, 0);
+		args_set(args, 'e', NULL, 0);
+		if (window_pane_set_mode(wp, wp, &window_copy_mode, NULL,
+		    args) == 0) {
+			window_copy_set_line_numbers(wp, 0);
+			entered = 1;
+		}
+		args_free(args);
+		wme = TAILQ_FIRST(&wp->modes);
+	}
 	if (wme == NULL || wme->mode != &window_copy_mode)
 		return (0);
 	data = wme->data;
 	if (data == NULL || !data->livemode)
+		return (0);
+	if (!entered && (wp->flags & PANE_REDRAW) != 0)
+		return (0);
+	if (!entered && c != NULL && EVBUFFER_LENGTH(c->tty.out) != 0)
 		return (0);
 
 	memset(&cs, 0, sizeof cs);

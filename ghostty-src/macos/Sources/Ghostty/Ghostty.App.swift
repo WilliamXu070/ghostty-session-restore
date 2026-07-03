@@ -187,18 +187,36 @@ extension Ghostty {
             ghostty_surface_request_close(surface)
         }
 
-        func newTab(surface: ghostty_surface_t) {
-            let action = "new_tab"
+        @discardableResult
+        private func bindingAction(surface: ghostty_surface_t, action: String) -> Bool {
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 logger.warning("action failed action=\(action)")
+                return false
             }
+            return true
+        }
+
+        func newTab(surface: ghostty_surface_t) {
+            bindingAction(surface: surface, action: "new_tab")
+        }
+
+        @discardableResult
+        func newmuxNewTab(surface: ghostty_surface_t) -> Bool {
+            return bindingAction(surface: surface, action: "newmux_new_tab")
+        }
+
+        @discardableResult
+        func newmuxCloseTab(surface: ghostty_surface_t) -> Bool {
+            return bindingAction(surface: surface, action: "newmux_close_tab")
+        }
+
+        @discardableResult
+        func newmuxRestoreTab(surface: ghostty_surface_t) -> Bool {
+            return bindingAction(surface: surface, action: "newmux_restore_tab")
         }
 
         func newWindow(surface: ghostty_surface_t) {
-            let action = "new_window"
-            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
-                logger.warning("action failed action=\(action)")
-            }
+            bindingAction(surface: surface, action: "new_window")
         }
 
         func split(surface: ghostty_surface_t, direction: ghostty_action_split_direction_e) {
@@ -869,6 +887,54 @@ extension Ghostty {
             ProcessInfo.processInfo.environment["NEWMUX_SESSION"] ?? "newmux"
         }
 
+        private static let newmuxTabMutationLock = NSLock()
+        private static var newmuxTabMutationInFlight = false
+        private static var newmuxTabMutationGeneration: UInt64 = 0
+
+        private static func beginNewmuxTabMutation(_ action: String) -> Bool {
+            newmuxTabMutationLock.lock()
+            defer { newmuxTabMutationLock.unlock() }
+            if newmuxTabMutationInFlight {
+                Ghostty.logger.debug("newmux tab action throttled action=\(action)")
+                return false
+            }
+            newmuxTabMutationInFlight = true
+            return true
+        }
+
+        private static func currentNewmuxTabGeneration() -> UInt64 {
+            newmuxTabMutationLock.lock()
+            defer { newmuxTabMutationLock.unlock() }
+            return newmuxTabMutationGeneration
+        }
+
+        private static func bumpNewmuxTabGeneration() {
+            newmuxTabMutationLock.lock()
+            newmuxTabMutationGeneration &+= 1
+            newmuxTabMutationLock.unlock()
+        }
+
+        private static func newmuxTabGenerationMatches(_ generation: UInt64) -> Bool {
+            newmuxTabMutationLock.lock()
+            defer { newmuxTabMutationLock.unlock() }
+            return newmuxTabMutationGeneration == generation
+        }
+
+        private static func finishNewmuxTabMutation(settleSeconds: TimeInterval) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + settleSeconds) {
+                newmuxTabMutationLock.lock()
+                newmuxTabMutationInFlight = false
+                newmuxTabMutationLock.unlock()
+            }
+        }
+
+        private static func insertIndexRightOfActiveTab(_ surfaceView: SurfaceView) -> Int? {
+            guard let window = surfaceView.window else { return nil }
+            guard let windows = window.tabGroup?.windows,
+                  let index = windows.firstIndex(of: window) else { return nil }
+            return index + 1
+        }
+
         private static func newmuxCommandSocketArgs() -> [String] {
             let env = ProcessInfo.processInfo.environment
             if let path = env["NEWMUX_SOCKET_PATH"], !path.isEmpty {
@@ -947,6 +1013,17 @@ extension Ghostty {
             }
         }
 
+        private static func deleteStaleNewmuxWindow(_ windowId: String) {
+            DispatchQueue.global(qos: .utility).async {
+                _ = runNewmuxCommand([
+                    "newmux-delete-window",
+                    "-P",
+                    "-s", newmuxPrimarySession(),
+                    "-t", windowId,
+                ])
+            }
+        }
+
         private static func mirrorNewmuxDelete(_ result: [String: String], fallbackWindowId: String) {
             let mode = result["mode"] ?? "hard"
             guard let sequence = result["sequence"], mode == "soft" else { return }
@@ -960,6 +1037,12 @@ extension Ghostty {
             ]
             if let targetIndex = result["target_index"] {
                 command += ["--target-index", targetIndex]
+            }
+            if let leftNeighbor = result["left_window_id"] {
+                command += ["--left-neighbor", leftNeighbor]
+            }
+            if let rightNeighbor = result["right_window_id"] {
+                command += ["--right-neighbor", rightNeighbor]
             }
             DispatchQueue.global(qos: .utility).async {
                 Self.runNewmuxRuntimeCompatibility(command)
@@ -1031,15 +1114,27 @@ extension Ghostty {
             target: ghostty_target_s,
             request: ghostty_action_newmux_tab_s
         ) -> Bool {
+            guard beginNewmuxTabMutation("new-tab") else { return true }
+
             switch target.tag {
             case GHOSTTY_TARGET_APP:
                 Ghostty.logger.warning("newmux new tab does nothing with an app target")
+                finishNewmuxTabMutation(settleSeconds: 0)
                 return false
 
             case GHOSTTY_TARGET_SURFACE:
-                guard let surface = target.target.surface else { return false }
-                guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                guard let appState = self.appState(fromView: surfaceView) else { return false }
+                guard let surface = target.target.surface else {
+                    finishNewmuxTabMutation(settleSeconds: 0)
+                    return false
+                }
+                guard let surfaceView = self.surfaceView(from: surface) else {
+                    finishNewmuxTabMutation(settleSeconds: 0)
+                    return false
+                }
+                guard let appState = self.appState(fromView: surfaceView) else {
+                    finishNewmuxTabMutation(settleSeconds: 0)
+                    return false
+                }
                 guard appState.config.windowDecorations else {
                     let alert = NSAlert()
                     alert.messageText = "Tabs are disabled"
@@ -1047,41 +1142,59 @@ extension Ghostty {
                     alert.addButton(withTitle: "OK")
                     alert.alertStyle = .warning
                     _ = alert.runModal()
+                    finishNewmuxTabMutation(settleSeconds: 0)
                     return false
                 }
 
-                let result: [String: String]?
-                var insertAt: Int?
+                let baseConfig = inheritedTabConfig(from: surface)
                 if let attachWindow = request.attach_window {
-                    var payload: [String: String] = [
-                        "ok": "1",
-                        "window": String(cString: attachWindow),
-                    ]
+                    let windowId = String(cString: attachWindow)
+                    var insertAt: Int?
                     if request.insert_at >= 0 {
-                        payload["target_index"] = String(request.insert_at)
                         insertAt = Int(request.insert_at)
                     }
-                    result = payload
-                } else {
-                    result = runNewmuxCommand([
+                    postNewmuxTab(
+                        surfaceView: surfaceView,
+                        baseConfig: baseConfig,
+                        windowId: windowId,
+                        insertAt: insertAt
+                    )
+                    finishNewmuxTabMutation(settleSeconds: 0.03)
+                    return true
+                }
+
+                let targetWindowId = newmuxWindowId(from: surfaceView)
+                let insertAt = insertIndexRightOfActiveTab(surfaceView)
+                let generation = currentNewmuxTabGeneration()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = runNewmuxCommand([
                         "newmux-create-window",
                         "-P",
                         "-s", newmuxPrimarySession(),
-                        "-t", newmuxWindowId(from: surfaceView),
+                        "-t", targetWindowId,
                     ])
+
+                    DispatchQueue.main.async {
+                        defer { finishNewmuxTabMutation(settleSeconds: 0.03) }
+                        guard let result,
+                              let windowId = result["window"] ?? result["window_id"] else { return }
+                        guard newmuxTabGenerationMatches(generation) else {
+                            deleteStaleNewmuxWindow(windowId)
+                            return
+                        }
+                        postNewmuxTab(
+                            surfaceView: surfaceView,
+                            baseConfig: baseConfig,
+                            windowId: windowId,
+                            insertAt: insertAt
+                        )
+                    }
                 }
-                guard let result,
-                      let windowId = result["window"] ?? result["window_id"] else { return false }
-                postNewmuxTab(
-                    surfaceView: surfaceView,
-                    baseConfig: inheritedTabConfig(from: surface),
-                    windowId: windowId,
-                    insertAt: insertAt
-                )
                 return true
 
             default:
                 assertionFailure()
+                finishNewmuxTabMutation(settleSeconds: 0)
                 return false
             }
         }
@@ -1183,20 +1296,37 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s
         ) -> Bool {
-            guard let surfaceView = newmuxSurfaceView(from: target) else { return false }
-            let windowId = newmuxWindowId(from: surfaceView)
-            guard let result = runNewmuxCommand([
-                "newmux-delete-window",
-                "-P",
-                "-s", newmuxPrimarySession(),
-                "-t", windowId,
-            ]) else { return false }
-            mirrorNewmuxDelete(result, fallbackWindowId: windowId)
+            guard beginNewmuxTabMutation("close-tab") else { return true }
 
+            guard let surfaceView = newmuxSurfaceView(from: target) else {
+                finishNewmuxTabMutation(settleSeconds: 0)
+                return false
+            }
+            guard let window = surfaceView.window,
+                  (window.tabGroup?.windows.count ?? 0) > 1 else {
+                finishNewmuxTabMutation(settleSeconds: 0.03)
+                return true
+            }
+            bumpNewmuxTabGeneration()
+            let windowId = newmuxWindowId(from: surfaceView)
             NotificationCenter.default.post(
                 name: .ghosttyCloseTab,
-                object: surfaceView
+                object: surfaceView,
+                userInfo: [
+                    Notification.NewmuxBackendDeletedKey: true,
+                ]
             )
+            finishNewmuxTabMutation(settleSeconds: 0.01)
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let result = runNewmuxCommand([
+                    "newmux-delete-window",
+                    "-P",
+                    "-s", newmuxPrimarySession(),
+                    "-t", windowId,
+                ]) else { return }
+                mirrorNewmuxDelete(result, fallbackWindowId: windowId)
+            }
             return true
         }
 
@@ -1204,24 +1334,36 @@ extension Ghostty {
             _ app: ghostty_app_t,
             target: ghostty_target_s
         ) -> Bool {
-            guard let surfaceView = newmuxSurfaceView(from: target),
-                  let surface = surfaceView.surface else { return false }
-            let result = runNewmuxCommand([
-                "newmux-reopen-latest-closed",
-                "-P",
-                "-t", "\(newmuxPrimarySession()):",
-            ])
-            guard let result else { return false }
-            guard result["restored"] != "0",
-                  let windowId = result["window"] ?? result["window_id"] else { return true }
+            guard beginNewmuxTabMutation("restore-tab") else { return true }
 
-            mirrorNewmuxRestore(result)
-            postNewmuxTab(
-                surfaceView: surfaceView,
-                baseConfig: inheritedTabConfig(from: surface),
-                windowId: windowId,
-                insertAt: result["target_index"].flatMap { Int($0) }
-            )
+            guard let surfaceView = newmuxSurfaceView(from: target),
+                  let surface = surfaceView.surface else {
+                finishNewmuxTabMutation(settleSeconds: 0)
+                return false
+            }
+            let baseConfig = inheritedTabConfig(from: surface)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = runNewmuxCommand([
+                    "newmux-reopen-latest-closed",
+                    "-P",
+                    "-t", "\(newmuxPrimarySession()):",
+                ])
+
+                DispatchQueue.main.async {
+                    defer { finishNewmuxTabMutation(settleSeconds: 0.05) }
+                    guard let result else { return }
+                    guard result["restored"] != "0",
+                          let windowId = result["window"] ?? result["window_id"] else { return }
+
+                    mirrorNewmuxRestore(result)
+                    postNewmuxTab(
+                        surfaceView: surfaceView,
+                        baseConfig: baseConfig,
+                        windowId: windowId,
+                        insertAt: result["target_index"].flatMap { Int($0) }
+                    )
+                }
+            }
             return true
         }
 

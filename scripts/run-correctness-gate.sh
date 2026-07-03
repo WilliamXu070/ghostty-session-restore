@@ -26,5 +26,6 @@ run_flow tests/flows/cmd-w-ui-tab-sync.json
 run_flow tests/flows/cmd-shift-t-noop-empty.json
 run_flow tests/flows/cmd-shift-t-restore-runtime-lifo.json
 run_flow tests/flows/cmd-t-new-tab-same-server.json
+run_step testing/test-newmux-gf-direct-launch-no-env-login-wrapper.sh
 
 printf '\nPASS newmux correctness gate\n'

@@ -401,6 +401,7 @@ extension Ghostty.Notification {
     static let ghosttyNewTab = Notification.Name("com.mitchellh.ghostty.newTab")
     static let NewmuxTabInsertAtKey = "com.mitchellh.ghostty.newmuxTab.insertAt"
     static let NewmuxTabEnvironmentKey = "com.mitchellh.ghostty.newmuxTab.environment"
+    static let NewmuxBackendDeletedKey = "com.mitchellh.ghostty.newmuxTab.backendDeleted"
 
     /// Newmux restore tab hook. Backend integration is owned separately.
     static let ghosttyNewmuxRestoreTab = Notification.Name("com.mitchellh.ghostty.newmuxRestoreTab")

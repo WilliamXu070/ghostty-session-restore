@@ -77,6 +77,13 @@ def int_field(fields: dict[str, str], key: str) -> int | None:
         return None
 
 
+def window_id_field(fields: dict[str, str], key: str) -> str | None:
+    value = fields.get(key)
+    if value is None or value in ("", "none"):
+        return None
+    return value if value.startswith("@") else f"@{value}"
+
+
 def prompt_only_after_empty_baseline(baseline: dict[str, Any] | None, line_count: int) -> bool:
     return bool(
         baseline
@@ -806,14 +813,29 @@ def delete(args: argparse.Namespace) -> int:
         sequence = int_field(fields, "sequence")
         if sequence is None:
             raise RuntimeError(f"newmux-delete-window did not return a sequence: {out.strip()}")
+        original_index = int_field(fields, "target_position")
+        if original_index is None:
+            original_index = int_field(fields, "target_index")
+        if original_index is None:
+            original_index = order_context["original_index"]
+        left_neighbor = (
+            window_id_field(fields, "left_window_id")
+            if "left_window_id" in fields
+            else order_context["left_neighbor"]
+        )
+        right_neighbor = (
+            window_id_field(fields, "right_window_id")
+            if "right_window_id" in fields
+            else order_context["right_neighbor"]
+        )
         item = {
             "sequence": sequence,
             "kind": "window",
             "window": fields.get("window") or fields.get("window_id") or window_id,
             "workspace": workspace,
-            "original_index": order_context["original_index"],
-            "left_neighbor": order_context["left_neighbor"],
-            "right_neighbor": order_context["right_neighbor"],
+            "original_index": original_index,
+            "left_neighbor": left_neighbor,
+            "right_neighbor": right_neighbor,
             "order_before_delete": order_context["order"],
             "names_before_delete": order_context["names"],
             "target_pane": args.target_pane,
@@ -931,14 +953,16 @@ def mirror_native_delete(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
     sequence = int(args.sequence)
     target_index = int(args.target_index) if args.target_index is not None else None
+    left_neighbor = None if args.left_neighbor in (None, "", "none") else args.left_neighbor
+    right_neighbor = None if args.right_neighbor in (None, "", "none") else args.right_neighbor
     item = {
         "sequence": sequence,
         "kind": "window",
         "window": args.target_window,
         "workspace": args.primary_session,
         "original_index": target_index,
-        "left_neighbor": None,
-        "right_neighbor": None,
+        "left_neighbor": left_neighbor,
+        "right_neighbor": right_neighbor,
         "order_before_delete": [],
         "names_before_delete": {},
         "target_pane": None,
@@ -1037,6 +1061,8 @@ def main() -> int:
     mirror_delete_parser.add_argument("--sequence", required=True)
     mirror_delete_parser.add_argument("--mode", default="soft")
     mirror_delete_parser.add_argument("--target-index")
+    mirror_delete_parser.add_argument("--left-neighbor")
+    mirror_delete_parser.add_argument("--right-neighbor")
     mirror_delete_parser.set_defaults(func=mirror_native_delete)
 
     mirror_restore_parser = subparsers.add_parser("mirror-native-restore")

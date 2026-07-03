@@ -2087,13 +2087,6 @@ struct client {
 	u_int			 click_button;
 	struct mouse_event	 click_event;
 
-	int			 newmux_scroll_pending_valid;
-	u_int			 newmux_scroll_pending_ticks;
-	u_int			 newmux_scroll_pending_lines_milli;
-	int			 newmux_scroll_pending_precision;
-	int			 newmux_scroll_pending_momentum;
-	u_int			 newmux_scroll_skip;
-
 	struct status_line	 status;
 	enum client_theme	 theme;
 
