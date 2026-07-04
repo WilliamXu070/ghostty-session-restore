@@ -351,6 +351,9 @@ extension Notification.Name {
     /// Close tabs to the right of the focused tab
     static let ghosttyCloseTabsOnTheRight = Notification.Name("com.mitchellh.ghostty.closeTabsOnTheRight")
 
+    /// Released the key that triggered `newmux_close_tab` in this tab window.
+    static let ghosttyNewmuxCloseTabHoldRelease = Notification.Name("com.mitchellh.ghostty.newmuxCloseTabHoldRelease")
+
     /// Close window
     static let ghosttyCloseWindow = Notification.Name("com.mitchellh.ghostty.closeWindow")
 

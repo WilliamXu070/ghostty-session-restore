@@ -1,0 +1,118 @@
+{
+  "name": "cmd-t-hold-cmd-w-final-close",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_start"
+    },
+    {
+      "do": "physical_shortcut_hold",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ],
+      "count": 7,
+      "interval": 0.03
+    },
+    {
+      "do": "wait",
+      "seconds": 2.0
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_t_hold"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_t_hold"
+    },
+    {
+      "do": "physical_shortcut_hold",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ],
+      "count": 12,
+      "interval": 0.03
+    },
+    {
+      "do": "wait",
+      "seconds": 1.5
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_w_hold"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_w_hold"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1.5
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_w_final"
+    }
+  ],
+  "expect": [
+    {
+      "ui_state": "ui_start",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    },
+    {
+      "state": "after_cmd_t_hold",
+      "workspaces": 1,
+      "windows_min": 5,
+      "windows_max": 8,
+      "panes_min": 5,
+      "panes_max": 8,
+      "lifo": 0
+    },
+    {
+      "ui_state": "ui_after_cmd_t_hold",
+      "native_tabs_min": 5,
+      "native_tabs_max": 8,
+      "rail_tabs_min": 5,
+      "rail_tabs_max": 8
+    },
+    {
+      "state": "after_cmd_w_hold",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "ui_state": "ui_after_cmd_w_hold",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    },
+    {
+      "state": "after_cmd_w_final",
+      "workspaces": 0,
+      "windows": 0,
+      "panes": 0
+    }
+  ]
+}

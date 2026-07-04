@@ -895,12 +895,9 @@ extension Ghostty {
                 .appendingPathComponent("newmux-pending-tabs", isDirectory: true)
         }
 
-        private static let newmuxTabMutationLock = NSLock()
         private static let newmuxMaximumTabs = 15
-        private static let newmuxTabCreateMinimumInterval: TimeInterval = 0.1
-        private static let newmuxTabCreateSuppressionAfterRestore: TimeInterval = 3.0
-        private static var newmuxLastTabCreateTime: TimeInterval = 0
-        private static var newmuxSuppressTabCreateUntil: TimeInterval = 0
+        private static let newmuxTabReservationLock = NSLock()
+        private static var newmuxPendingTabCreateReservations = 0
         private static let newmuxRestoreReservationQueue = DispatchQueue(
             label: "com.mitchellh.ghostty.newmux.restore-reservations",
             qos: .userInitiated
@@ -911,29 +908,26 @@ extension Ghostty {
             return count < newmuxMaximumTabs
         }
 
-        private static func shouldAcceptNewmuxTabCreate() -> Bool {
-            let now = Date.timeIntervalSinceReferenceDate
-            newmuxTabMutationLock.lock()
-            defer { newmuxTabMutationLock.unlock() }
+        private static func reserveNewmuxTabCreate(_ surfaceView: SurfaceView) -> Bool {
+            guard !NSEvent.modifierFlags.contains(.shift) else { return false }
 
-            if now < newmuxSuppressTabCreateUntil {
+            newmuxTabReservationLock.lock()
+            defer { newmuxTabReservationLock.unlock() }
+
+            let visibleTabs = surfaceView.window?.tabGroup?.windows.count ?? 1
+            guard visibleTabs + newmuxPendingTabCreateReservations < newmuxMaximumTabs else {
                 return false
             }
-            if now - newmuxLastTabCreateTime < newmuxTabCreateMinimumInterval {
-                return false
-            }
-            newmuxLastTabCreateTime = now
+            newmuxPendingTabCreateReservations += 1
             return true
         }
 
-        private static func suppressNewmuxTabCreateAfterRestore() {
-            let until = Date.timeIntervalSinceReferenceDate +
-                newmuxTabCreateSuppressionAfterRestore
-            newmuxTabMutationLock.lock()
-            if until > newmuxSuppressTabCreateUntil {
-                newmuxSuppressTabCreateUntil = until
+        private static func releaseNewmuxTabCreateReservation() {
+            newmuxTabReservationLock.lock()
+            if newmuxPendingTabCreateReservations > 0 {
+                newmuxPendingTabCreateReservations -= 1
             }
-            newmuxTabMutationLock.unlock()
+            newmuxTabReservationLock.unlock()
         }
 
         private static func insertIndexRightOfActiveTab(_ surfaceView: SurfaceView) -> Int? {
@@ -1189,7 +1183,6 @@ extension Ghostty {
             var environment = [
                 "NEWMUX_ATTACH_PENDING_TOKEN": token,
                 "NEWMUX_ATTACH_PENDING_DIR": pendingDirectory.path,
-                "NEWMUX_ATTACH_PENDING_WAIT_MS": "8000",
                 "NEWMUX_ATTACH_PENDING_CREATE": "1",
             ]
             if let targetWindowId, !targetWindowId.isEmpty {
@@ -1325,14 +1318,11 @@ extension Ghostty {
                     return true
                 }
 
-                guard shouldAcceptNewmuxTabCount(surfaceView) else {
+                guard reserveNewmuxTabCreate(surfaceView) else {
                     Ghostty.logger.debug("newmux tab create capped at \(newmuxMaximumTabs)")
                     return true
                 }
-                guard shouldAcceptNewmuxTabCreate() else {
-                    Ghostty.logger.debug("newmux tab create rate-limited")
-                    return true
-                }
+                defer { releaseNewmuxTabCreateReservation() }
                 let targetWindowId = newmuxWindowId(from: surfaceView)
 
                 let insertAt = appendIndexForTabGroup(surfaceView) ??
@@ -1455,9 +1445,8 @@ extension Ghostty {
             guard let surfaceView = newmuxSurfaceView(from: target) else {
                 return false
             }
-            guard let window = surfaceView.window,
-                  (window.tabGroup?.windows.count ?? 0) > 1 else {
-                return true
+            guard let window = surfaceView.window else {
+                return false
             }
             let windowId = newmuxKnownWindowId(from: surfaceView)
             let pendingToken = (surfaceView.window?.windowController as? TerminalController)?
@@ -1473,6 +1462,10 @@ extension Ghostty {
                     Notification.NewmuxBackendDeletedKey: true,
                 ]
             )
+
+            guard (window.tabGroup?.windows.count ?? 0) > 1 else {
+                return true
+            }
 
             var candidates: [String] = []
             if let windowId {
@@ -1545,7 +1538,6 @@ extension Ghostty {
                 Ghostty.logger.debug("newmux restore tab capped at \(newmuxMaximumTabs)")
                 return true
             }
-            suppressNewmuxTabCreateAfterRestore()
 
             let baseConfig = inheritedTabConfig(from: surface)
             let pendingDirectory = newmuxPendingTabDirectory()

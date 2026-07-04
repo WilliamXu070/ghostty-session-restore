@@ -67,6 +67,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
+    /// Tracks the "hold to delete the last remaining tab requires fresh press" flow.
+    private var pendingNewmuxCloseHold = false
+    private var newmuxCloseHoldReleaseObserved = false
+
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
@@ -141,6 +145,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             self,
             selector: #selector(onCloseWindow),
             name: .ghosttyCloseWindow,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(onNewmuxCloseTabHoldRelease(_:)),
+            name: .ghosttyNewmuxCloseTabHoldRelease,
             object: nil
         )
     }
@@ -1656,10 +1666,42 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }
         if notification.userInfo?[Ghostty.Notification.NewmuxBackendDeletedKey] as? Bool == true {
+            guard let window else { return }
+            let visibleTabs = window.tabGroup?.windows.count ?? 0
+
+            if pendingNewmuxCloseHold {
+                if visibleTabs > 2 {
+                    pendingNewmuxCloseHold = false
+                    newmuxCloseHoldReleaseObserved = false
+                } else if !newmuxCloseHoldReleaseObserved {
+                    return
+                } else {
+                    pendingNewmuxCloseHold = false
+                    newmuxCloseHoldReleaseObserved = false
+                    closeWindowImmediately()
+                    return
+                }
+            }
+
+            guard visibleTabs > 1 else {
+                closeWindowImmediately()
+                return
+            }
+
+            if visibleTabs == 2 {
+                pendingNewmuxCloseHold = true
+            }
             closeTabImmediately(registerRedo: false)
             return
         }
         closeTab(self)
+    }
+
+    @objc private func onNewmuxCloseTabHoldRelease(_ notification: Notification) {
+        guard let target = notification.object as? TerminalController else { return }
+        guard target == self else { return }
+        guard pendingNewmuxCloseHold else { return }
+        newmuxCloseHoldReleaseObserved = true
     }
 
     @objc private func onCloseOtherTabs(notification: SwiftUI.Notification) {

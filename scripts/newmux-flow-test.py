@@ -613,6 +613,97 @@ class FlowRunner:
             interval=interval,
         )
 
+    def press_ghostty_shortcut_hold(
+        self,
+        key: str,
+        modifiers: list[str],
+        count: int,
+        interval: float,
+    ) -> None:
+        key_codes = {
+            "t": "17",
+            "w": "13",
+            "d": "2",
+            "left_bracket": "33",
+            "right_bracket": "30",
+        }
+        if key not in key_codes:
+            raise FlowFailure(f"unsupported physical shortcut key: {key}")
+        if count < 1:
+            raise FlowFailure(f"repeat count must be positive: {count}")
+
+        hold_command = any(mod == "command down" for mod in modifiers)
+        non_command_mods = [modifier for modifier in modifiers if modifier != "command down"]
+        mods = ", ".join([*non_command_mods, "command down"] if hold_command else non_command_mods)
+        repeat_line = (
+            f"key code {key_codes[key]} using {{{mods}}}"
+            if mods
+            else f"key code {key_codes[key]}"
+        )
+
+        self.event(
+            "action.start",
+            action="press_ghostty_shortcut_hold",
+            key=key,
+            modifiers=modifiers,
+            count=count,
+            interval=interval,
+            hold_command=hold_command,
+        )
+        if hold_command:
+            focus = self.ghostty_focus_script()
+            body = (
+                f"    {repeat_line}\n"
+                f"    delay {interval:.3f}\n"
+            )
+            proc = self.run_cmd(
+                [
+                    "osascript",
+                    "-e",
+                    (
+                        focus
+                        + f"  key down (key code 55)\n"
+                        + f"  repeat {count} times\n"
+                        + body
+                        + "  end repeat\n"
+                        + "  key up (key code 55)\n"
+                        + "end tell"
+                    ),
+                ],
+                check=False,
+            )
+        else:
+            focus = self.ghostty_focus_script()
+            proc = self.run_cmd(
+                [
+                    "osascript",
+                    "-e",
+                    (
+                        focus
+                        + f"  repeat {count} times\n"
+                        + f"    {repeat_line}\n"
+                        + f"    delay {interval:.3f}\n"
+                        + "  end repeat\n"
+                        + "end tell"
+                    ),
+                ],
+                check=False,
+            )
+        if proc.returncode != 0:
+            raise FlowFailure(
+                f"physical shortcut hold failed ({proc.returncode}) key={key} "
+                f"modifiers={modifiers}: {proc.stderr or proc.stdout}"
+            )
+        self.event(
+            "action.end",
+            action="press_ghostty_shortcut_hold",
+            key=key,
+            modifiers=modifiers,
+            count=count,
+            interval=interval,
+            hold_command=hold_command,
+        )
+
     def perform_ghostty_action(self, action_name: str) -> None:
         self.event("action.start", action="perform_ghostty_action", name=action_name)
         proc = self.run_cmd(
@@ -762,6 +853,13 @@ class FlowRunner:
                 )
             elif action == "physical_shortcut_repeat":
                 self.press_ghostty_shortcut_repeat(
+                    str(step["key"]),
+                    [str(modifier) for modifier in step.get("modifiers", [])],
+                    int(step.get("count", 1)),
+                    float(step.get("interval", 0.05)),
+                )
+            elif action == "physical_shortcut_hold":
+                self.press_ghostty_shortcut_hold(
                     str(step["key"]),
                     [str(modifier) for modifier in step.get("modifiers", [])],
                     int(step.get("count", 1)),

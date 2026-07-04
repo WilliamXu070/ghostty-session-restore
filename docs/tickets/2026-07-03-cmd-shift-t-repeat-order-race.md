@@ -95,3 +95,42 @@ Verification added:
 
 - `sh -n scripts/start-newmux-fresh.sh`
 - `python3 scripts/newmux-flow-test.py tests/flows/cmd-t-new-tab-same-server.json`
+
+## 2026-07-04 Create Wait Removal
+
+Symptom: holding `Cmd+T` still felt like the old path because Ghostty retained
+a `100ms` create throttle, and create tabs still carried the old pending attach
+wait env even though the spawned tab now creates its own backend window.
+
+Fix: removed the create throttle entirely and dropped
+`NEWMUX_ATTACH_PENDING_WAIT_MS` from pending-create tabs. To keep
+`Cmd+Shift+T` leakage from becoming creates, `newmux_new_tab` now rejects only
+while the Shift modifier is currently down instead of using a broad post-restore
+timer. A create slot reservation now counts visible plus just-posted native
+tabs so held `Cmd+T` cannot queue invisible pending tabs beyond the Newmux tab
+cap.
+
+Verification added:
+
+- `python3 scripts/benchmark-newmux-lifecycle.py --passes 1 --driver action --burst-interval 0.02 --timeout 10 --out .local/benchmarks/newmux-lifecycle-create-waits-before.json`
+- `python3 scripts/benchmark-newmux-lifecycle.py --passes 1 --driver action --burst-interval 0.02 --timeout 10 --out .local/benchmarks/newmux-lifecycle-create-waits-after.json`
+- `python3 scripts/newmux-flow-test.py tests/flows/cmd-t-w-background-burst-no-buffer.json`
+- `python3 scripts/newmux-flow-test.py tests/flows/cmd-shift-t-restore-runtime-lifo.json`
+- `python3 scripts/newmux-flow-test.py tests/flows/cmd-t-new-tab-same-server.json`
+- `./scripts/build-ghostty.sh`
+- `./scripts/refresh-spotlight-ghostty.sh`
+- `./scripts/test-ghostty-config.sh`
+- `./scripts/test-newmux.sh`
+
+Measured effect:
+
+- before: held `Cmd+T` burst stayed at `after_cmd_t_windows=2`
+- after: held `Cmd+T` burst reaches the cap, `after_cmd_t_windows=15`
+- clean `Cmd+T` visible stayed about the same: `61.9ms`
+
+Remaining separate failure:
+
+- `python3 scripts/newmux-flow-test.py tests/flows/cmd-shift-t-repeat-order-guard.json`
+  currently fails before restore because physical `Cmd+W` does not delete the
+  dirty tabs in that flow. The same run shows physical `Cmd+T` working, so this
+  is a shortcut/delete path issue, not a create wait gate.
