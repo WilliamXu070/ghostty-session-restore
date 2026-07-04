@@ -67,10 +67,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
-    /// Tracks the "hold to delete the last remaining tab requires fresh press" flow.
-    private var pendingNewmuxCloseHold = false
-    private var newmuxCloseHoldReleaseObserved = false
-
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
@@ -1669,27 +1665,36 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             guard let window else { return }
             let visibleTabs = window.tabGroup?.windows.count ?? 0
 
-            if pendingNewmuxCloseHold {
+            if Self.pendingNewmuxCloseHold {
                 if visibleTabs > 2 {
-                    pendingNewmuxCloseHold = false
-                    newmuxCloseHoldReleaseObserved = false
-                } else if !newmuxCloseHoldReleaseObserved {
+                    Self.pendingNewmuxCloseHold = false
+                    Self.newmuxCloseHoldReleaseObserved = false
+                } else if !Self.newmuxCloseHoldReleaseObserved {
                     return
                 } else {
-                    pendingNewmuxCloseHold = false
-                    newmuxCloseHoldReleaseObserved = false
+                    Self.pendingNewmuxCloseHold = false
+                    Self.newmuxCloseHoldReleaseObserved = false
+                    NotificationCenter.default.post(
+                        name: .ghosttyNewmuxFinalCloseAccepted,
+                        object: self
+                    )
                     closeWindowImmediately()
                     return
                 }
             }
 
             guard visibleTabs > 1 else {
+                NotificationCenter.default.post(
+                    name: .ghosttyNewmuxFinalCloseAccepted,
+                    object: self
+                )
                 closeWindowImmediately()
                 return
             }
 
             if visibleTabs == 2 {
-                pendingNewmuxCloseHold = true
+                Self.pendingNewmuxCloseHold = true
+                Self.newmuxCloseHoldReleaseObserved = false
             }
             closeTabImmediately(registerRedo: false)
             return
@@ -1698,10 +1703,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     @objc private func onNewmuxCloseTabHoldRelease(_ notification: Notification) {
-        guard let target = notification.object as? TerminalController else { return }
-        guard target == self else { return }
-        guard pendingNewmuxCloseHold else { return }
-        newmuxCloseHoldReleaseObserved = true
+        guard Self.pendingNewmuxCloseHold else { return }
+        Self.newmuxCloseHoldReleaseObserved = true
     }
 
     @objc private func onCloseOtherTabs(notification: SwiftUI.Notification) {
@@ -1776,6 +1779,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 // MARK: NSMenuItemValidation
 
 extension TerminalController {
+    private static var pendingNewmuxCloseHold = false
+    private static var newmuxCloseHoldReleaseObserved = false
+
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(closeTabsOnTheRight):

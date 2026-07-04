@@ -354,6 +354,9 @@ extension Notification.Name {
     /// Released the key that triggered `newmux_close_tab` in this tab window.
     static let ghosttyNewmuxCloseTabHoldRelease = Notification.Name("com.mitchellh.ghostty.newmuxCloseTabHoldRelease")
 
+    /// The final Newmux tab close passed the hold gate and should tear down the backend workspace.
+    static let ghosttyNewmuxFinalCloseAccepted = Notification.Name("com.mitchellh.ghostty.newmuxFinalCloseAccepted")
+
     /// Close window
     static let ghosttyCloseWindow = Notification.Name("com.mitchellh.ghostty.closeWindow")
 

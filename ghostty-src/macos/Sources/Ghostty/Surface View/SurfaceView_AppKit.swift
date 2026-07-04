@@ -337,6 +337,10 @@ extension Ghostty {
                     // We need keyUp because command+key events don't trigger keyUp.
                     .keyUp,
 
+                    // Newmux close-hold gating needs Command release even after
+                    // the tab that started the hold has already closed.
+                    .flagsChanged,
+
                     // We need leftMouseDown to determine if we should focus ourselves
                     // when the app/window isn't in focus. We do this instead of
                     // "acceptsFirstMouse" because that forces us to also handle the
@@ -605,12 +609,25 @@ extension Ghostty {
             case .keyUp:
                 localEventKeyUp(event)
 
+            case .flagsChanged:
+                localEventFlagsChanged(event)
+
             case .leftMouseDown:
                 localEventLeftMouseDown(event)
 
             default:
                 event
             }
+        }
+
+        private func localEventFlagsChanged(_ event: NSEvent) -> NSEvent? {
+            guard event.keyCode == 0x37 || event.keyCode == 0x36 else { return event }
+            guard !event.modifierFlags.contains(.command) else { return event }
+            NotificationCenter.default.post(
+                name: .ghosttyNewmuxCloseTabHoldRelease,
+                object: window?.windowController
+            )
+            return event
         }
 
         private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
@@ -673,12 +690,6 @@ extension Ghostty {
             // Command keyUp events are never sent to the normal responder chain
             // so we send them here.
             guard focused else { return event }
-            if let key = Ghostty.Input.Key(keyCode: event.keyCode), key == .w {
-                NotificationCenter.default.post(
-                    name: .ghosttyNewmuxCloseTabHoldRelease,
-                    object: window?.windowController
-                )
-            }
             self.keyUp(with: event)
             return nil
         }

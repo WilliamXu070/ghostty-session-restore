@@ -97,6 +97,11 @@ extension Ghostty {
                 selector: #selector(applicationDidResignActive(notification:)),
                 name: NSApplication.didResignActiveNotification,
                 object: nil)
+            center.addObserver(
+                self,
+                selector: #selector(newmuxFinalCloseAccepted(notification:)),
+                name: .ghosttyNewmuxFinalCloseAccepted,
+                object: nil)
 #endif
 
             self.readiness = .ready
@@ -117,6 +122,17 @@ extension Ghostty {
             guard let app = self.app else { return }
             ghostty_app_tick(app)
         }
+
+#if os(macOS)
+        @objc private func newmuxFinalCloseAccepted(notification: SwiftUI.Notification) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = Self.runNewmuxCommand([
+                    "kill-session",
+                    "-t", Self.newmuxPrimarySession(),
+                ])
+            }
+        }
+#endif
 
         private static func openConfig(_ app: ghostty_app_t) {
             guard let app_ud = ghostty_app_userdata(app) else { return }
@@ -1454,6 +1470,7 @@ extension Ghostty {
             let pendingDirectory = (surfaceView.window?.windowController as? TerminalController)?
                 .newmuxPendingWindowDirectory
             let nativeIndex = window.tabGroup?.windows.firstIndex(of: window)
+            let visibleTabsBeforeClose = window.tabGroup?.windows.count ?? 1
 
             NotificationCenter.default.post(
                 name: .ghosttyCloseTab,
@@ -1463,7 +1480,7 @@ extension Ghostty {
                 ]
             )
 
-            guard (window.tabGroup?.windows.count ?? 0) > 1 else {
+            guard visibleTabsBeforeClose > 1 else {
                 return true
             }
 

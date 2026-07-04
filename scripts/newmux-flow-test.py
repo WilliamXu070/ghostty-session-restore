@@ -190,9 +190,25 @@ class FlowRunner:
                 self.flow.get("socket_name", "newmux-dev"),
                 "--socket-path",
                 self.socket_path(),
-            ]
+            ],
+            check=False,
         )
-        snapshot = json.loads(proc.stdout)
+        if proc.returncode == 0:
+            snapshot = json.loads(proc.stdout)
+        elif "no server running" in (proc.stderr + proc.stdout):
+            snapshot = {
+                "type": "snapshot",
+                "schema": "newmux.ui.snapshot.v1",
+                "socket_name": self.flow.get("socket_name", "newmux-dev"),
+                "sessions": [],
+                "windows": [],
+                "panes": [],
+                "recovery_stack": [],
+            }
+        else:
+            raise FlowFailure(
+                f"snapshot failed ({proc.returncode}): {proc.stderr or proc.stdout}"
+            )
         derived = self.derive(snapshot)
         record = {
             "type": "snapshot",
@@ -634,7 +650,7 @@ class FlowRunner:
 
         hold_command = any(mod == "command down" for mod in modifiers)
         non_command_mods = [modifier for modifier in modifiers if modifier != "command down"]
-        mods = ", ".join([*non_command_mods, "command down"] if hold_command else non_command_mods)
+        mods = ", ".join(non_command_mods if hold_command else modifiers)
         repeat_line = (
             f"key code {key_codes[key]} using {{{mods}}}"
             if mods
@@ -662,11 +678,11 @@ class FlowRunner:
                     "-e",
                     (
                         focus
-                        + f"  key down (key code 55)\n"
+                        + "  key down command\n"
                         + f"  repeat {count} times\n"
                         + body
                         + "  end repeat\n"
-                        + "  key up (key code 55)\n"
+                        + "  key up command\n"
                         + "end tell"
                     ),
                 ],
