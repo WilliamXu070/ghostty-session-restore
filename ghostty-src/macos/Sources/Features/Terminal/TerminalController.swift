@@ -190,11 +190,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                             self?.newmuxPendingWindowToken = nil
                             self?.newmuxPendingWindowDirectory = nil
                         }
+                        Self.cleanupNewmuxPendingFiles(token: token, directory: directory, delay: 2)
                         return
                     }
                 }
                 Thread.sleep(forTimeInterval: 0.02)
             }
+            Self.cleanupNewmuxPendingFiles(token: token, directory: directory, delay: 0)
+        }
+    }
+
+    private static func cleanupNewmuxPendingFiles(token: String, directory: String, delay: TimeInterval) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            let base = URL(fileURLWithPath: directory)
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).window"))
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).sequence"))
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).cancelled"))
         }
     }
 

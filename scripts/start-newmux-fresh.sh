@@ -18,6 +18,10 @@ DIRECT_ATTACH_WINDOW=${NEWMUX_ATTACH_WINDOW:-}
 PENDING_ATTACH_TOKEN=${NEWMUX_ATTACH_PENDING_TOKEN:-}
 PENDING_ATTACH_DIR=${NEWMUX_ATTACH_PENDING_DIR:-}
 PENDING_ATTACH_WAIT_MS=${NEWMUX_ATTACH_PENDING_WAIT_MS:-8000}
+PENDING_ATTACH_RESTORE=${NEWMUX_ATTACH_PENDING_RESTORE:-0}
+PENDING_ATTACH_CREATE=${NEWMUX_ATTACH_PENDING_CREATE:-0}
+PENDING_CREATE_INSERT_AT=${NEWMUX_CREATE_INSERT_AT:-}
+PENDING_CREATE_TARGET_WINDOW=${NEWMUX_CREATE_TARGET_WINDOW:-}
 
 trace_now_ms()
 {
@@ -168,7 +172,112 @@ validate_pending_token()
 	esac
 }
 
-wait_for_pending_attach_window()
+validate_restore_sequence()
+{
+	sequence=$1
+	case "$sequence" in
+		''|*[!0-9]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+pending_attach_window_file()
+{
+	printf '%s/%s.window\n' "$PENDING_ATTACH_DIR" "$PENDING_ATTACH_TOKEN"
+}
+
+write_pending_attach_window()
+{
+	window_id=$1
+	validate_pending_token "$PENDING_ATTACH_TOKEN" || return 1
+	[ -n "$PENDING_ATTACH_DIR" ] || return 1
+	mkdir -p "$PENDING_ATTACH_DIR" 2>/dev/null || return 1
+	printf '%s\n' "$window_id" > "$(pending_attach_window_file)" 2>/dev/null || return 1
+}
+
+pending_attach_cancelled()
+{
+	validate_pending_token "$PENDING_ATTACH_TOKEN" || return 0
+	[ -n "$PENDING_ATTACH_DIR" ] || return 0
+	[ -f "$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.cancelled" ]
+}
+
+validate_create_insert_at()
+{
+	value=$1
+	case "$value" in
+		''|*[!0-9]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+create_pending_window_id()
+{
+	validate_pending_token "$PENDING_ATTACH_TOKEN" || return 1
+	[ -n "$PENDING_ATTACH_DIR" ] || return 1
+	pending_attach_cancelled && return 1
+
+	set -- newmux-create-window -P -s "$PRIMARY_SESSION"
+	if validate_create_insert_at "$PENDING_CREATE_INSERT_AT"; then
+		set -- "$@" -i "$PENDING_CREATE_INSERT_AT"
+	fi
+	has_create_target=0
+	if validate_window_id "$PENDING_CREATE_TARGET_WINDOW"; then
+		has_create_target=1
+		set -- "$@" -t "$PENDING_CREATE_TARGET_WINDOW"
+	fi
+
+	trace_restore "pending_create.command.start" "args=$*"
+	result=$(newmux "$@" 2>/dev/null || true)
+	trace_restore "pending_create.command.end" "result=${result:-}"
+	if [ -z "$result" ] && [ "$has_create_target" != 0 ]; then
+		set -- newmux-create-window -P -s "$PRIMARY_SESSION"
+		if validate_create_insert_at "$PENDING_CREATE_INSERT_AT"; then
+			set -- "$@" -i "$PENDING_CREATE_INSERT_AT"
+		fi
+		trace_restore "pending_create.retry_without_target.start" \
+			"args=$*"
+		result=$(newmux "$@" 2>/dev/null || true)
+		trace_restore "pending_create.retry_without_target.end" \
+			"result=${result:-}"
+	fi
+	[ -n "$result" ] || return 1
+
+	window_id=$(restore_field "$result" window_id)
+	validate_window_id "$window_id" || return 1
+
+	if pending_attach_cancelled; then
+		trace_restore "pending_create.cancel_after_create" \
+			"window_id=$window_id"
+		newmux newmux-delete-window -P -s "$PRIMARY_SESSION" \
+			-t "$window_id" >/dev/null 2>&1 || true
+		return 1
+	fi
+
+	write_pending_attach_window "$window_id" || true
+	printf '%s\n' "$window_id"
+	return 0
+}
+
+release_reserved_restore_sequence()
+{
+	sequence=$1
+	validate_restore_sequence "$sequence" || return 1
+	trace_restore "release_reserved.start" "sequence=$sequence"
+	newmux newmux-release-reserved-closed -P -S "$sequence" \
+		>/dev/null 2>&1 || true
+	trace_restore "release_reserved.end" "sequence=$sequence"
+}
+
+wait_for_pending_restore_sequence()
 {
 	validate_pending_token "$PENDING_ATTACH_TOKEN" || return 1
 	[ -n "$PENDING_ATTACH_DIR" ] || return 1
@@ -178,18 +287,22 @@ wait_for_pending_attach_window()
 			;;
 	esac
 
-	pending_file="$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.window"
+	sequence_file="$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.sequence"
 	cancel_file="$PENDING_ATTACH_DIR/$PENDING_ATTACH_TOKEN.cancelled"
 	waited_ms=0
 	while [ "$waited_ms" -lt "$PENDING_ATTACH_WAIT_MS" ]; do
-		[ -f "$cancel_file" ] && return 1
-		if [ -f "$pending_file" ]; then
-			window_id=$(sed -n '1p' "$pending_file" 2>/dev/null || true)
-			if validate_window_id "$window_id"; then
-				printf '%s\n' "$window_id"
+		if [ -f "$sequence_file" ]; then
+			sequence=$(sed -n '1p' "$sequence_file" 2>/dev/null || true)
+			if validate_restore_sequence "$sequence"; then
+				if [ -f "$cancel_file" ]; then
+					release_reserved_restore_sequence "$sequence"
+					return 1
+				fi
+				printf '%s\n' "$sequence"
 				return 0
 			fi
 		fi
+		[ -f "$cancel_file" ] && return 1
 		sleep 0.02
 		waited_ms=$((waited_ms + 20))
 	done
@@ -261,6 +374,10 @@ claim_reserved_restore_window_id()
 	fi
 
 	trace_restore "claim_reserved.ok" "window_id=$window_id"
+	"$ROOT/scripts/newmux-runtime.py" mirror-native-restore \
+		--socket-name "$SOCKET_NAME" \
+		--socket-path "$SOCKET_PATH" \
+		--sequence "$request_sequence" >/dev/null 2>&1 || true &
 	printf '%s\n' "$window_id"
 	return 0
 }
@@ -360,8 +477,10 @@ attach_native_tab_to_window()
 	trace_restore "attach.new_session.start" "tab_session=$tab_session"
 	newmux new-session -d -t "$PRIMARY_SESSION" -s "$tab_session"
 	trace_restore "attach.new_session.end" "tab_session=$tab_session"
+
 	trace_restore "attach.select_window.start" "window_id=$window_id" \
 		"tab_session=$tab_session"
+
 	if ! newmux select-window -t "$tab_session:$window_id" >/dev/null 2>&1; then
 		trace_restore "attach.select_window.failed" "window_id=$window_id" \
 			"tab_session=$tab_session"
@@ -416,13 +535,41 @@ if [ ! -x "$ROOT/bin/newmux" ]; then
 fi
 
 if [ "${1:-}" != kill-only ] && [ -n "$PENDING_ATTACH_TOKEN" ]; then
-	trace_restore "pending_attach.start" "token=$PENDING_ATTACH_TOKEN"
-	if TAB_WINDOW=$(wait_for_pending_attach_window); then
-		trace_restore "pending_attach.ok" "window_id=$TAB_WINDOW"
-		attach_native_tab_to_window "$TAB_WINDOW"
+	if [ "$PENDING_ATTACH_CREATE" != 0 ]; then
+		trace_restore "pending_create.start" "token=$PENDING_ATTACH_TOKEN" \
+			"insert_at=$PENDING_CREATE_INSERT_AT" \
+			"target_window=$PENDING_CREATE_TARGET_WINDOW"
+		if TAB_WINDOW=$(create_pending_window_id); then
+			trace_restore "pending_create.ok" "window_id=$TAB_WINDOW"
+			attach_native_tab_to_window "$TAB_WINDOW"
+		fi
+		trace_restore "pending_create.failed" "token=$PENDING_ATTACH_TOKEN"
+		exit 0
+	elif [ "$PENDING_ATTACH_RESTORE" != 0 ]; then
+		trace_restore "pending_restore.start" "token=$PENDING_ATTACH_TOKEN"
+		if RESTORE_SEQUENCE=$(wait_for_pending_restore_sequence); then
+			trace_restore "pending_restore.sequence" \
+				"sequence=$RESTORE_SEQUENCE"
+			if TAB_WINDOW=$(claim_reserved_restore_window_id \
+				"$RESTORE_SEQUENCE"); then
+				trace_restore "pending_restore.ok" \
+					"window_id=$TAB_WINDOW"
+				write_pending_attach_window "$TAB_WINDOW" || true
+				attach_native_tab_to_window "$TAB_WINDOW"
+			fi
+			status=$?
+			trace_restore "pending_restore.claim_failed" \
+				"status=$status" "sequence=$RESTORE_SEQUENCE"
+			release_reserved_restore_sequence "$RESTORE_SEQUENCE"
+			exit 0
+		fi
+		trace_restore "pending_restore.timeout" \
+			"token=$PENDING_ATTACH_TOKEN"
+		exit 0
+	else
+		trace_restore "pending_unknown" "token=$PENDING_ATTACH_TOKEN"
+		exit 0
 	fi
-	trace_restore "pending_attach.timeout" "token=$PENDING_ATTACH_TOKEN"
-	exit 0
 fi
 
 if [ "${1:-}" != kill-only ] && [ -n "$DIRECT_ATTACH_WINDOW" ]; then

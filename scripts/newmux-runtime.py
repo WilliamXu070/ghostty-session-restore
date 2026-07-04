@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -112,6 +114,17 @@ def tab_session_map_path(run_dir: Path) -> Path:
     return run_dir / "native-tab-sessions.json"
 
 
+@contextlib.contextmanager
+def tab_session_map_lock(run_dir: Path):
+    lock_path = run_dir / "native-tab-sessions.lock"
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def read_baselines(run_dir: Path) -> dict[str, Any]:
     try:
         return json.loads(baseline_path(run_dir).read_text())
@@ -189,38 +202,49 @@ def write_tab_session_map(run_dir: Path, mapping: dict[str, str]) -> None:
     tmp.replace(target)
 
 
+def kill_native_tab_session(socket_path: str | None, socket_name_arg: str, session: str) -> bool:
+    if not session.startswith("newmux-tab-"):
+        return False
+    newmux(socket_path, socket_name_arg, "kill-session", "-t", session, check=False)
+    return True
+
+
 def restore_tab_session_windows(
     socket_path: str | None,
     socket_name_arg: str,
     run_dir: Path,
 ) -> dict[str, Any]:
-    mapping = read_tab_session_map(run_dir)
-    kept: dict[str, str] = {}
-    restored: list[dict[str, str]] = []
-    dropped: list[dict[str, str]] = []
-    for session, window_id in mapping.items():
-        exists = bool(
-            newmux(
-                socket_path,
-                socket_name_arg,
-                "display-message",
-                "-p",
-                "-t",
-                session,
-                "#{session_name}",
-                check=False,
-            ).strip()
-        )
-        if not exists:
-            dropped.append({"session": session, "window": window_id})
-            continue
-        windows = {row["window"] for row in session_windows(socket_path, socket_name_arg, session)}
-        if window_id in windows:
+    with tab_session_map_lock(run_dir):
+        mapping = read_tab_session_map(run_dir)
+        kept: dict[str, str] = {}
+        restored: list[dict[str, str]] = []
+        dropped: list[dict[str, str]] = []
+        for session, window_id in mapping.items():
+            exists = bool(
+                newmux(
+                    socket_path,
+                    socket_name_arg,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    session,
+                    "#{session_name}",
+                    check=False,
+                ).strip()
+            )
+            if not exists:
+                dropped.append({"session": session, "window": window_id})
+                continue
+            windows = {row["window"] for row in session_windows(socket_path, socket_name_arg, session)}
+            if window_id not in windows:
+                kill_native_tab_session(socket_path, socket_name_arg, session)
+                dropped.append({"session": session, "window": window_id})
+                continue
             newmux(socket_path, socket_name_arg, "select-window", "-t", f"{session}:{window_id}", check=False)
             restored.append({"session": session, "window": window_id})
-        kept[session] = window_id
-    if kept != mapping:
-        write_tab_session_map(run_dir, kept)
+            kept[session] = window_id
+        if kept != mapping:
+            write_tab_session_map(run_dir, kept)
     return {"restored": restored, "dropped": dropped}
 
 
@@ -922,9 +946,10 @@ def restore_latest(args: argparse.Namespace) -> int:
 
 def remember_tab_session(args: argparse.Namespace) -> int:
     run_dir = runtime_dir(args.socket_path, args.socket_name)
-    mapping = read_tab_session_map(run_dir)
-    mapping[args.tab_session] = args.window_id
-    write_tab_session_map(run_dir, mapping)
+    with tab_session_map_lock(run_dir):
+        mapping = read_tab_session_map(run_dir)
+        mapping[args.tab_session] = args.window_id
+        write_tab_session_map(run_dir, mapping)
     runtime_event(
         run_dir,
         "native_tab_session.remember",
@@ -933,6 +958,53 @@ def remember_tab_session(args: argparse.Namespace) -> int:
     )
     if args.json:
         print(json.dumps({"ok": True, "session": args.tab_session, "window": args.window_id}, sort_keys=True))
+    return 0
+
+
+def forget_tab_window(args: argparse.Namespace) -> int:
+    run_dir = runtime_dir(args.socket_path, args.socket_name)
+    socket_name_arg = socket_name(args.socket_path, args.socket_name)
+    with tab_session_map_lock(run_dir):
+        mapping = read_tab_session_map(run_dir)
+        kept: dict[str, str] = {}
+        forgotten: list[dict[str, str]] = []
+        pruned: list[dict[str, str]] = []
+
+        for session, window_id in mapping.items():
+            if window_id == args.target_window:
+                kill_native_tab_session(args.socket_path, socket_name_arg, session)
+                forgotten.append({"session": session, "window": window_id})
+                continue
+
+            exists = bool(
+                newmux(
+                    args.socket_path,
+                    socket_name_arg,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    session,
+                    "#{session_name}",
+                    check=False,
+                ).strip()
+            )
+            if not exists:
+                pruned.append({"session": session, "window": window_id})
+                continue
+
+            windows = {row["window"] for row in session_windows(args.socket_path, socket_name_arg, session)}
+            if window_id not in windows:
+                kill_native_tab_session(args.socket_path, socket_name_arg, session)
+                pruned.append({"session": session, "window": window_id})
+                continue
+
+            kept[session] = window_id
+
+        if kept != mapping:
+            write_tab_session_map(run_dir, kept)
+    runtime_event(run_dir, "native_tab_session.forget", forgotten=forgotten, pruned=pruned)
+    if args.json:
+        print(json.dumps({"ok": True, "forgotten": forgotten, "pruned": pruned}, sort_keys=True))
     return 0
 
 
@@ -1048,6 +1120,12 @@ def main() -> int:
     remember_parser.add_argument("--window-id", required=True)
     remember_parser.add_argument("--json", action="store_true")
     remember_parser.set_defaults(func=remember_tab_session)
+
+    forget_parser = subparsers.add_parser("forget-tab-window")
+    add_common(forget_parser)
+    forget_parser.add_argument("--target-window", required=True)
+    forget_parser.add_argument("--json", action="store_true")
+    forget_parser.set_defaults(func=forget_tab_window)
 
     restore_tabs_parser = subparsers.add_parser("restore-tab-sessions")
     add_common(restore_tabs_parser)

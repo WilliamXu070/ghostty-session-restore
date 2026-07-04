@@ -82,6 +82,8 @@ static enum cmd_retval	cmd_newmux_reserve_latest_closed_exec(struct cmd *,
 			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_claim_reserved_closed_exec(struct cmd *,
 			    struct cmdq_item *);
+static enum cmd_retval	cmd_newmux_release_reserved_closed_exec(struct cmd *,
+			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_list_recently_closed_exec(struct cmd *,
 			    struct cmdq_item *);
 static enum cmd_retval	cmd_newmux_clear_recently_closed_exec(struct cmd *,
@@ -130,8 +132,9 @@ const struct cmd_entry cmd_newmux_create_window_entry = {
 	.name = "newmux-create-window",
 	.alias = NULL,
 
-	.args = { "Ps:t:", 0, 0, NULL },
-	.usage = "[-P] [-s primary-session] " CMD_TARGET_PANE_USAGE,
+	.args = { "Pi:s:t:", 0, 0, NULL },
+	.usage = "[-P] [-i target-index] [-s primary-session] "
+	    CMD_TARGET_PANE_USAGE,
 
 	.target = { 't', CMD_FIND_PANE, 0 },
 
@@ -187,6 +190,17 @@ const struct cmd_entry cmd_newmux_claim_reserved_closed_entry = {
 
 	.flags = 0,
 	.exec = cmd_newmux_claim_reserved_closed_exec
+};
+
+const struct cmd_entry cmd_newmux_release_reserved_closed_entry = {
+	.name = "newmux-release-reserved-closed",
+	.alias = NULL,
+
+	.args = { "PS:", 0, 0, NULL },
+	.usage = "[-P] -S sequence",
+
+	.flags = 0,
+	.exec = cmd_newmux_release_reserved_closed_exec
 };
 
 const struct cmd_entry cmd_newmux_list_recently_closed_entry = {
@@ -1293,7 +1307,10 @@ cmd_newmux_create_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	struct client		*tc = cmdq_get_target_client(cmdq_item);
 	struct session		*s;
 	struct winlink		*target_wl = target->wl;
+	struct winlink		*position_wl;
 	int			 insertion_idx = -1;
+	const char		*value, *errstr;
+	long long		 target_position;
 	struct winlink		*new_wl;
 	char			*cause = NULL, *cwd = NULL;
 
@@ -1305,10 +1322,23 @@ cmd_newmux_create_window_exec(struct cmd *self, struct cmdq_item *cmdq_item)
 	if (cwd == NULL)
 		cwd = xstrdup(server_client_get_cwd(tc, s));
 
-	if (target_wl == NULL || target_wl->session != s) {
+	value = args_get(args, 'i');
+	if (value != NULL) {
+		target_position = strtonum(value, 0, INT_MAX, &errstr);
+		if (errstr != NULL) {
+			cmdq_error(cmdq_item, "invalid target index: %s", value);
+			free(cwd);
+			return (CMD_RETURN_ERROR);
+		}
+		position_wl = newmux_winlink_at_position(s,
+		    (u_int)target_position);
+		if (position_wl != NULL)
+			insertion_idx = winlink_shuffle_up(s, position_wl, 1);
+	} else if (target_wl == NULL || target_wl->session != s) {
 		target_wl = s->curw;
-	}
-	if (target_wl != NULL) {
+		if (target_wl != NULL)
+			insertion_idx = winlink_shuffle_up(s, target_wl, 0);
+	} else if (target_wl != NULL) {
 		insertion_idx = winlink_shuffle_up(s, target_wl, 0);
 	}
 
@@ -1543,6 +1573,45 @@ cmd_newmux_claim_reserved_closed_exec(struct cmd *self,
 		newmux_print_closed_item(cmdq_item, item, 0);
 
 	newmux_free_item(item);
+	return (CMD_RETURN_NORMAL);
+}
+
+static enum cmd_retval
+cmd_newmux_release_reserved_closed_exec(struct cmd *self,
+    struct cmdq_item *cmdq_item)
+{
+	struct newmux_closed_item	*item;
+	struct args			*args = cmd_get_args(self);
+	const char			*value, *errstr;
+	long long			 n;
+	u_int				 sequence;
+	int				 print = args_has(args, 'P');
+
+	value = args_get(args, 'S');
+	if (value == NULL) {
+		cmdq_error(cmdq_item, "missing reserved sequence");
+		return (CMD_RETURN_ERROR);
+	}
+	n = strtonum(value, 1, UINT_MAX, &errstr);
+	if (errstr != NULL) {
+		cmdq_error(cmdq_item, "invalid reserved sequence: %s", value);
+		return (CMD_RETURN_ERROR);
+	}
+	sequence = n;
+
+	item = newmux_reserved_pop_by_sequence(sequence);
+	if (item == NULL) {
+		if (print)
+			cmdq_print(cmdq_item,
+			    "ok=1 action=release released=0 reason=missing "
+			    "sequence=%u", sequence);
+		return (CMD_RETURN_NORMAL);
+	}
+
+	newmux_stack_push(item);
+	if (print)
+		cmdq_print(cmdq_item,
+		    "ok=1 action=release released=1 sequence=%u", sequence);
 	return (CMD_RETURN_NORMAL);
 }
 

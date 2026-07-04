@@ -408,6 +408,46 @@ class FlowRunner:
         proc = self.run_cmd([str(ROOT / "bin" / "newmux"), "-S", self.socket_path(), *args])
         return proc.stdout
 
+    def current_derived(self) -> dict[str, Any] | None:
+        proc = self.run_cmd(
+            [
+                "python3",
+                str(ROOT / "scripts" / "newmux-ui-bridge.py"),
+                "snapshot",
+                "--socket-name",
+                self.flow.get("socket_name", "newmux-dev"),
+                "--socket-path",
+                self.socket_path(),
+            ],
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        try:
+            return self.derive(json.loads(proc.stdout))
+        except json.JSONDecodeError:
+            return None
+
+    def wait_for_window_count_at_least(self, count: int, timeout: float = 2.0) -> None:
+        deadline = time.time() + timeout
+        last: dict[str, Any] | None = None
+        while time.time() < deadline:
+            last = self.current_derived()
+            if last is not None and int(last.get("windows") or 0) >= count:
+                return
+            time.sleep(0.05)
+        raise FlowFailure(f"timed out waiting for at least {count} windows; last={last}")
+
+    def wait_for_window_count_at_most(self, count: int, timeout: float = 2.0) -> None:
+        deadline = time.time() + timeout
+        last: dict[str, Any] | None = None
+        while time.time() < deadline:
+            last = self.current_derived()
+            if last is not None and int(last.get("windows") or 0) <= count:
+                return
+            time.sleep(0.05)
+        raise FlowFailure(f"timed out waiting for at most {count} windows; last={last}")
+
     def mark_runtime(self, target: str) -> None:
         self.run_cmd(
             [
@@ -424,32 +464,11 @@ class FlowRunner:
     def cmd_t(self, from_state: str) -> None:
         pane_id = self.choose_target_pane(from_state)
         socket_path = self.socket_path()
+        expected_windows = int(self.states[from_state]["derived"].get("windows") or 0) + 1
         self.event("action.start", action="cmd_t", socket_path=socket_path, target_pane=pane_id)
-        env = {
-            "NEWMUX_SOCKET": self.flow.get("socket_name", "newmux-dev"),
-            "NEWMUX_SOCKET_PATH": socket_path,
-        }
-        proc = self.run_cmd(
-            [
-                "python3",
-                str(ROOT / "scripts" / "newmux-runtime.py"),
-                "create-window",
-                "--socket-path",
-                socket_path,
-                "--target",
-                pane_id,
-            ]
-        )
-        window_id = str(json.loads(proc.stdout)["window"])
-        self.run_cmd(
-            [str(ROOT / "scripts" / "start-newmux-fresh.sh")],
-            env_extra={
-                **env,
-                "NEWMUX_ATTACH_WINDOW": window_id,
-                "NEWMUX_STARTER_PRINT_WINDOW": "1",
-            },
-        )
-        self.event("action.end", action="cmd_t", socket_path=socket_path, target_pane=pane_id, window=window_id)
+        self.perform_ghostty_action("newmux_new_tab")
+        self.wait_for_window_count_at_least(expected_windows)
+        self.event("action.end", action="cmd_t", socket_path=socket_path, target_pane=pane_id)
 
     def cmd_d(self, from_state: str, target: str = "primary_active") -> None:
         pane_id = self.choose_target_pane(from_state, target)
@@ -462,18 +481,10 @@ class FlowRunner:
     def cmd_w(self, from_state: str, target: str = "primary_active") -> None:
         pane_id = self.choose_target_pane(from_state, target)
         window_id = self.pane_window(from_state, pane_id)
+        expected_windows = max(1, int(self.states[from_state]["derived"].get("windows") or 0) - 1)
         self.event("action.start", action="cmd_w", socket_path=self.socket_path(), target_pane=pane_id)
-        self.run_cmd(
-            [
-                "python3",
-                str(ROOT / "scripts" / "newmux-runtime.py"),
-                "delete-window",
-                "--socket-path",
-                self.socket_path(),
-                "--target-window",
-                window_id,
-            ]
-        )
+        self.perform_ghostty_action("newmux_close_tab")
+        self.wait_for_window_count_at_most(expected_windows)
         self.event("action.end", action="cmd_w", socket_path=self.socket_path(), target_pane=pane_id, window=window_id)
 
     def rename_window(self, from_state: str, target: str, name: str) -> None:

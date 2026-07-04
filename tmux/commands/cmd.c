@@ -78,6 +78,7 @@ extern const struct cmd_entry cmd_newmux_create_window_entry;
 extern const struct cmd_entry cmd_newmux_delete_window_entry;
 extern const struct cmd_entry cmd_newmux_list_recently_closed_entry;
 extern const struct cmd_entry cmd_newmux_reopen_latest_closed_entry;
+extern const struct cmd_entry cmd_newmux_release_reserved_closed_entry;
 extern const struct cmd_entry cmd_newmux_reserve_latest_closed_entry;
 extern const struct cmd_entry cmd_newmux_soft_delete_pane_entry;
 extern const struct cmd_entry cmd_newmux_soft_delete_session_entry;
@@ -181,6 +182,7 @@ const struct cmd_entry *cmd_table[] = {
 	&cmd_newmux_delete_window_entry,
 	&cmd_newmux_list_recently_closed_entry,
 	&cmd_newmux_reopen_latest_closed_entry,
+	&cmd_newmux_release_reserved_closed_entry,
 	&cmd_newmux_reserve_latest_closed_entry,
 	&cmd_newmux_soft_delete_pane_entry,
 	&cmd_newmux_soft_delete_session_entry,
