@@ -106,6 +106,7 @@ static void	window_copy_hide_history_cursor(struct window_mode_entry *);
 static int	window_copy_adjust_selection(struct window_mode_entry *,
 		    u_int *, u_int *);
 static int	window_copy_set_selection(struct window_mode_entry *, int, int);
+static int	window_copy_selection_intersects_screen(struct window_mode_entry *);
 static int	window_copy_update_selection(struct window_mode_entry *, int,
 		    int);
 static void	window_copy_native_selection_sync(struct window_mode_entry *,
@@ -160,9 +161,12 @@ static void	window_copy_scroll_up(struct window_mode_entry *, u_int);
 static void	window_copy_scroll_down(struct window_mode_entry *, u_int);
 static void	window_copy_rectangle_set(struct window_mode_entry *, int);
 static void	window_copy_move_mouse(struct mouse_event *);
+static int	window_copy_native_drag_outside(struct window_mode_entry *,
+		    struct mouse_event *, u_int *, u_int *);
 static void	window_copy_drag_update(struct client *, struct mouse_event *);
 static void	window_copy_drag_release(struct client *, struct mouse_event *);
 static void	window_copy_jump_to_mark(struct window_mode_entry *);
+static void	window_copy_wheel_timer(int, short, void *);
 static void	window_copy_acquire_cursor_up(struct window_mode_entry *,
 		    u_int, u_int, u_int, u_int, u_int);
 static void	window_copy_acquire_cursor_down(struct window_mode_entry *,
@@ -284,10 +288,16 @@ struct window_copy_mode_data {
 	int		 native_sel_active; /* mouse selection anchored to grid */
 	int		 native_sel_dragging;
 	int		 native_sel_suppress_cursor;
+	int		 native_sel_edge;
+	u_int		 native_sel_edge_x;
+	u_int		 native_sel_edge_y;
 	u_int		 native_sel_start_x;
 	u_int		 native_sel_start_y;
 	u_int		 native_sel_end_x;
 	u_int		 native_sel_end_y;
+
+	int		 selection_cell_valid;
+	struct grid_cell selection_cell;
 
 	enum {
 		CURSORDRAG_NONE,	/* selection is independent of cursor */
@@ -365,11 +375,22 @@ struct window_copy_mode_data {
 	int		 wheel_emit_valid;
 	struct timeval	 wheel_emit_time;
 	int		 wheel_direction;
+	u_int		 wheel_emit_count;
 	u_int		 wheel_pending_milli;
+	struct event	 wheel_timer;
 
 	struct event	 dragtimer;
 #define WINDOW_COPY_DRAG_REPEAT_TIME 50000
+#define WINDOW_COPY_DRAG_SCROLL_MARGIN 2
 };
+
+static int
+window_copy_has_logical_selection(struct window_copy_mode_data *data)
+{
+	return (data->screen.sel != NULL || data->native_sel_active ||
+	    data->lineflag != LINE_SEL_NONE ||
+	    data->cursordrag != CURSORDRAG_NONE);
+}
 
 static void
 window_copy_scroll_timer(__unused int fd, __unused short events, void *arg)
@@ -377,6 +398,7 @@ window_copy_scroll_timer(__unused int fd, __unused short events, void *arg)
 	struct window_mode_entry	*wme = arg;
 	struct window_pane		*wp = wme->wp;
 	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = &data->screen;
 	struct timeval			 tv = {
 		.tv_usec = WINDOW_COPY_DRAG_REPEAT_TIME
 	};
@@ -386,10 +408,24 @@ window_copy_scroll_timer(__unused int fd, __unused short events, void *arg)
 	if (TAILQ_FIRST(&wp->modes) != wme)
 		return;
 
+	if (data->native_sel_dragging && data->native_sel_edge != 0) {
+		evtimer_add(&data->dragtimer, &tv);
+		if (data->native_sel_edge < 0)
+			window_copy_scroll_down(wme, 1);
+		else
+			window_copy_scroll_up(wme, 1);
+		data->native_sel_end_x = data->native_sel_edge_x;
+		data->native_sel_end_y = screen_hsize(data->backing) +
+		    data->native_sel_edge_y - data->oy;
+		window_copy_native_selection_sync(wme, 0);
+		window_copy_redraw_screen(wme);
+		return;
+	}
+
 	if (data->cy == 0) {
 		evtimer_add(&data->dragtimer, &tv);
 		window_copy_cursor_up(wme, 1);
-	} else if (data->cy == screen_size_y(&data->screen) - 1) {
+	} else if (data->cy == screen_size_y(s) - 1) {
 		evtimer_add(&data->dragtimer, &tv);
 		window_copy_cursor_down(wme, 1);
 	}
@@ -488,6 +524,7 @@ window_copy_common_init(struct window_mode_entry *wme)
 	screen_set_default_cursor(&data->screen, global_w_options);
 	data->modekeys = options_get_number(wp->window->options, "mode-keys");
 
+	evtimer_set(&data->wheel_timer, window_copy_wheel_timer, wme);
 	evtimer_set(&data->dragtimer, window_copy_scroll_timer, wme);
 
 	return (data);
@@ -580,6 +617,7 @@ window_copy_free(struct window_mode_entry *wme)
 {
 	struct window_copy_mode_data	*data = wme->data;
 
+	evtimer_del(&data->wheel_timer);
 	evtimer_del(&data->dragtimer);
 
 	free(data->searchmark);
@@ -1025,7 +1063,7 @@ window_copy_formats(struct window_mode_entry *wme, struct format_tree *ft)
 	format_add(ft, "copy_cursor_x", "%d", data->cx);
 	format_add(ft, "copy_cursor_y", "%d", data->cy);
 
-	if (data->screen.sel != NULL) {
+	if (window_copy_has_logical_selection(data)) {
 		format_add(ft, "selection_start_x", "%d", data->selx);
 		format_add(ft, "selection_start_y", "%d", data->sely);
 		format_add(ft, "selection_end_x", "%d", data->endselx);
@@ -1169,6 +1207,7 @@ window_copy_update(struct window_mode_entry *wme)
 	u_int				 sy, visible_top, visible_bottom;
 	u_int				 dirty_top, dirty_bottom, dirty_abs_top;
 	u_int				 dirty_abs_bottom, dirty_span, cursor_x, cursor_y;
+	u_int				 redraw_top, redraw_bottom;
 	int				 search, dirty, redrew, visible_dirty;
 
 	if (!data->livemode)
@@ -1229,17 +1268,23 @@ window_copy_update(struct window_mode_entry *wme)
 			    dirty_abs_top <= visible_bottom);
 
 			/*
-			 * Small dirty ranges are usually one-line spinners. Larger
-			 * dirty ranges with no history growth are also live
-			 * mutations, such as Codex repainting a compact thinking
-			 * block in place. Large ranges caused by appended output are
-			 * kept cheap so old history does not become expensive again.
+			 * Redraw only live rows that are actually visible. Codex,
+			 * Claude Code, opencode, and similar TUIs often repaint a
+			 * spinner or compact status block at the bottom; treating
+			 * that as a full-screen history redraw makes stationary
+			 * conversation scrollback feel much heavier than it is.
 			 */
 			if (visible_dirty && (dirty_span <= 4 ||
 			    old_hsize == data->live_hsize)) {
-				window_copy_redraw_screen(wme);
-				wp->flags |= PANE_REDRAW;
-				server_redraw_window(wp->window);
+				redraw_top = dirty_abs_top;
+				if (redraw_top < visible_top)
+					redraw_top = visible_top;
+				redraw_bottom = dirty_abs_bottom;
+				if (redraw_bottom > visible_bottom)
+					redraw_bottom = visible_bottom;
+				window_copy_redraw_lines(wme,
+				    redraw_top - visible_top,
+				    redraw_bottom - redraw_top + 1);
 				redrew = 1;
 			}
 			if (!redrew &&
@@ -1373,6 +1418,7 @@ window_copy_cmd_stop_selection(struct window_copy_cmd_state *cs)
 
 	data->cursordrag = CURSORDRAG_NONE;
 	data->native_sel_dragging = 0;
+	data->native_sel_edge = 0;
 	data->lineflag = LINE_SEL_NONE;
 	data->selflag = SEL_CHAR;
 	return (WINDOW_COPY_CMD_NOTHING);
@@ -2391,10 +2437,11 @@ window_copy_cmd_scroll_exit_toggle(struct window_copy_cmd_state *cs)
 #define NEWMUX_WHEEL_RESET_US 120000
 #define NEWMUX_WHEEL_FRAME_US 8333
 #define NEWMUX_WHEEL_SENSITIVITY_MILLI 2500
-#define NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND 900
-#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND 840
-#define NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK 48
-#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK 44
+#define NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND 640
+#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND 560
+#define NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK 8
+#define NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK 8
+#define NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK 1
 #define NEWMUX_WHEEL_MODE_SMOOTH 1
 #define NEWMUX_WHEEL_MODE_SINGLE_LINE 2
 
@@ -2403,6 +2450,174 @@ window_copy_time_diff_us(struct timeval *now, struct timeval *then)
 {
 	return ((long long)(now->tv_sec - then->tv_sec) * 1000000LL +
 	    now->tv_usec - then->tv_usec);
+}
+
+static void
+window_copy_wheel_reset(struct window_copy_mode_data *data, int direction,
+    struct timeval *now, int emit_valid)
+{
+	evtimer_del(&data->wheel_timer);
+	data->wheel_direction = direction;
+	data->wheel_pending_milli = 0;
+	data->wheel_emit_count = 0;
+	data->wheel_last_time = *now;
+	data->wheel_emit_time = *now;
+	data->wheel_emit_valid = emit_valid;
+}
+
+static u_int
+window_copy_wheel_ramp_cap(struct window_copy_mode_data *data, u_int step_cap)
+{
+	u_int	ramp_cap;
+
+	if (data->wheel_emit_count < 3)
+		ramp_cap = 1;
+	else if (data->wheel_emit_count < 7)
+		ramp_cap = 2;
+	else if (data->wheel_emit_count < 12)
+		ramp_cap = 4;
+	else
+		ramp_cap = 8;
+	if (step_cap > ramp_cap)
+		step_cap = ramp_cap;
+	return (step_cap);
+}
+
+static void
+window_copy_wheel_limits(int direction, u_int *max_lines_per_second,
+    u_int *max_lines_per_tick)
+{
+	if (direction == 1) {
+		if (max_lines_per_second != NULL)
+			*max_lines_per_second =
+			    NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND;
+		if (max_lines_per_tick != NULL)
+			*max_lines_per_tick = NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK;
+	} else {
+		if (max_lines_per_second != NULL)
+			*max_lines_per_second =
+			    NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND;
+		if (max_lines_per_tick != NULL)
+			*max_lines_per_tick = NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK;
+	}
+}
+
+static u_int
+window_copy_wheel_next_step(struct window_copy_mode_data *data, int direction,
+    long long since_emit)
+{
+	unsigned long long	 speed_cap;
+	u_int			 max_lines_per_second, max_lines_per_tick;
+	u_int			 step, step_cap;
+
+	window_copy_wheel_limits(direction, &max_lines_per_second,
+	    &max_lines_per_tick);
+	step_cap = window_copy_wheel_ramp_cap(data, max_lines_per_tick);
+	if (data->screen.sel != NULL &&
+	    step_cap > NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK)
+		step_cap = NEWMUX_WHEEL_SELECTION_MAX_LINES_PER_TICK;
+
+	speed_cap = (unsigned long long)max_lines_per_second *
+	    (unsigned long long)since_emit;
+	step = (speed_cap + 999999) / 1000000;
+	if (step < 1)
+		step = 1;
+	if (step > step_cap)
+		step = step_cap;
+	if (step > data->wheel_pending_milli / 1000)
+		step = data->wheel_pending_milli / 1000;
+	return (step);
+}
+
+static void
+window_copy_wheel_consume_step(struct window_copy_mode_data *data,
+    int direction, u_int step, struct timeval *now)
+{
+	u_int	 max_lines_per_tick;
+
+	window_copy_wheel_limits(direction, NULL, &max_lines_per_tick);
+	data->wheel_pending_milli -= step * 1000;
+	if (data->wheel_pending_milli > max_lines_per_tick * 1000)
+		data->wheel_pending_milli = max_lines_per_tick * 1000;
+	if (data->wheel_emit_count != UINT_MAX)
+		data->wheel_emit_count++;
+	data->wheel_emit_valid = 1;
+	data->wheel_emit_time = *now;
+}
+
+static void
+window_copy_wheel_schedule_timer(struct window_mode_entry *wme,
+    struct timeval *now)
+{
+	struct window_copy_mode_data	*data = wme->data;
+	struct timeval			 tv = { .tv_usec = 1 };
+	long long			 since_emit;
+
+	if (!data->livemode || data->wheel_pending_milli < 1000) {
+		evtimer_del(&data->wheel_timer);
+		return;
+	}
+	if (evtimer_pending(&data->wheel_timer, NULL))
+		return;
+	if (data->wheel_emit_valid) {
+		since_emit = window_copy_time_diff_us(now, &data->wheel_emit_time);
+		if (since_emit >= 0 && since_emit < NEWMUX_WHEEL_FRAME_US)
+			tv.tv_usec = NEWMUX_WHEEL_FRAME_US - since_emit;
+	}
+	evtimer_add(&data->wheel_timer, &tv);
+}
+
+static void
+window_copy_wheel_timer(__unused int fd, __unused short events, void *arg)
+{
+	struct window_mode_entry		*wme = arg;
+	struct window_pane		*wp = wme->wp;
+	struct window_copy_mode_data	*data = wme->data;
+	struct timeval			 now;
+	long long			 since_emit;
+	u_int				 old_oy, step;
+
+	if (wp == NULL || TAILQ_FIRST(&wp->modes) != wme ||
+	    wme->mode != &window_copy_mode || data == NULL || !data->livemode ||
+	    !data->wheel_last_valid || data->wheel_pending_milli < 1000)
+		return;
+	if (gettimeofday(&now, NULL) != 0)
+		fatal("gettimeofday failed");
+
+	if (data->wheel_emit_valid) {
+		since_emit = window_copy_time_diff_us(&now,
+		    &data->wheel_emit_time);
+		if (since_emit >= 0 && since_emit < NEWMUX_WHEEL_FRAME_US) {
+			window_copy_wheel_schedule_timer(wme, &now);
+			return;
+		}
+	} else
+		since_emit = NEWMUX_WHEEL_FRAME_US;
+	if (since_emit < 0)
+		since_emit = NEWMUX_WHEEL_FRAME_US;
+
+	step = window_copy_wheel_next_step(data, data->wheel_direction,
+	    since_emit);
+	if (step == 0)
+		return;
+	window_copy_wheel_consume_step(data, data->wheel_direction, step,
+	    &now);
+
+	old_oy = data->oy;
+	if (data->wheel_direction == 1)
+		window_copy_scroll_up(wme, step);
+	else
+		window_copy_scroll_down(wme, step);
+	if (data->oy == old_oy) {
+		data->wheel_pending_milli = 0;
+		evtimer_del(&data->wheel_timer);
+		return;
+	}
+	if (data->scroll_exit && data->wheel_direction == 1 && data->oy == 0) {
+		window_pane_reset_mode(wp);
+		return;
+	}
+	window_copy_wheel_schedule_timer(wme, &now);
 }
 
 static u_int
@@ -2427,22 +2642,14 @@ window_copy_wheel_prefix_single_line(struct window_copy_cmd_state *cs)
 
 	if (!data->wheel_last_valid) {
 		data->wheel_last_valid = 1;
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = 1;
+		window_copy_wheel_reset(data, direction, &now, 1);
 		return (1);
 	}
 
 	since_last = window_copy_time_diff_us(&now, &data->wheel_last_time);
 	if (direction != data->wheel_direction ||
 	    since_last > NEWMUX_WHEEL_RESET_US || since_last < 0) {
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = 1;
+		window_copy_wheel_reset(data, direction, &now, 1);
 		return (1);
 	}
 
@@ -2474,10 +2681,7 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 	struct mouse_event		*m = cs->m;
 	struct timeval			 now;
 	long long			 since_last, since_emit;
-	unsigned long long		 speed_cap;
 	u_int				 incoming_milli;
-	u_int				 max_lines_per_second;
-	u_int				 max_lines_per_tick;
 	u_int				 step;
 	int				 direction;
 
@@ -2494,11 +2698,8 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 
 	if (!data->wheel_last_valid) {
 		data->wheel_last_valid = 1;
-		data->wheel_emit_valid = !m->newmux_scroll_valid;
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
+		window_copy_wheel_reset(data, direction, &now,
+		    !m->newmux_scroll_valid);
 		if (!m->newmux_scroll_valid)
 			return (1);
 	}
@@ -2506,11 +2707,8 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 	since_last = window_copy_time_diff_us(&now, &data->wheel_last_time);
 	if (direction != data->wheel_direction ||
 	    since_last > NEWMUX_WHEEL_RESET_US || since_last < 0) {
-		data->wheel_direction = direction;
-		data->wheel_pending_milli = 0;
-		data->wheel_last_time = now;
-		data->wheel_emit_time = now;
-		data->wheel_emit_valid = !m->newmux_scroll_valid;
+		window_copy_wheel_reset(data, direction, &now,
+		    !m->newmux_scroll_valid);
 		if (!m->newmux_scroll_valid)
 			return (1);
 	}
@@ -2525,38 +2723,23 @@ window_copy_wheel_prefix_smooth(struct window_copy_cmd_state *cs)
 	if (data->wheel_emit_valid) {
 		since_emit = window_copy_time_diff_us(&now,
 		    &data->wheel_emit_time);
-		if (since_emit >= 0 && since_emit < NEWMUX_WHEEL_FRAME_US)
+		if (since_emit >= 0 && since_emit < NEWMUX_WHEEL_FRAME_US) {
+			window_copy_wheel_schedule_timer(cs->wme, &now);
 			return (0);
+		}
 	} else
 		since_emit = NEWMUX_WHEEL_FRAME_US;
 	if (since_emit < 0)
 		since_emit = NEWMUX_WHEEL_FRAME_US;
 
-	if (direction == 1) {
-		max_lines_per_second = NEWMUX_WHEEL_MAX_DOWN_LINES_PER_SECOND;
-		max_lines_per_tick = NEWMUX_WHEEL_MAX_DOWN_LINES_PER_TICK;
-	} else {
-		max_lines_per_second = NEWMUX_WHEEL_MAX_UP_LINES_PER_SECOND;
-		max_lines_per_tick = NEWMUX_WHEEL_MAX_UP_LINES_PER_TICK;
+	step = window_copy_wheel_next_step(data, direction, since_emit);
+	if (step == 0) {
+		window_copy_wheel_schedule_timer(cs->wme, &now);
+		return (0);
 	}
 
-	speed_cap = (unsigned long long)max_lines_per_second *
-	    (unsigned long long)since_emit;
-	step = (speed_cap + 999999) / 1000000;
-	if (step < 1)
-		step = 1;
-	if (step > max_lines_per_tick)
-		step = max_lines_per_tick;
-	if (step > data->wheel_pending_milli / 1000)
-		step = data->wheel_pending_milli / 1000;
-	if (step == 0)
-		return (0);
-
-	data->wheel_pending_milli -= step * 1000;
-	if (data->wheel_pending_milli > max_lines_per_tick * 1000)
-		data->wheel_pending_milli = max_lines_per_tick * 1000;
-	data->wheel_emit_valid = 1;
-	data->wheel_emit_time = now;
+	window_copy_wheel_consume_step(data, direction, step, &now);
+	window_copy_wheel_schedule_timer(cs->wme, &now);
 	return (step);
 }
 
@@ -2581,8 +2764,12 @@ window_copy_cmd_scroll_down(struct window_copy_cmd_state *cs)
 	if (np == 0)
 		return (WINDOW_COPY_CMD_NOOP);
 	old_oy = data->oy;
-	for (; np != 0; np--)
-		window_copy_cursor_down(wme, 1);
+	if (data->livemode)
+		window_copy_scroll_up(wme, np);
+	else {
+		for (; np != 0; np--)
+			window_copy_cursor_down(wme, 1);
+	}
 	if (data->scroll_exit && data->oy == 0)
 		return (WINDOW_COPY_CMD_CANCEL);
 	if (data->livemode && data->oy == old_oy)
@@ -2600,8 +2787,12 @@ window_copy_cmd_scroll_down_and_cancel(struct window_copy_cmd_state *cs)
 	if (np == 0)
 		return (WINDOW_COPY_CMD_NOOP);
 	old_oy = data->oy;
-	for (; np != 0; np--)
-		window_copy_cursor_down(wme, 1);
+	if (data->livemode)
+		window_copy_scroll_up(wme, np);
+	else {
+		for (; np != 0; np--)
+			window_copy_cursor_down(wme, 1);
+	}
 	if (data->oy == 0)
 		return (WINDOW_COPY_CMD_CANCEL);
 	if (data->livemode && data->oy == old_oy)
@@ -2630,8 +2821,12 @@ window_copy_cmd_scroll_up(struct window_copy_cmd_state *cs)
 	if (np == 0)
 		return (WINDOW_COPY_CMD_NOOP);
 	old_oy = data->oy;
-	for (; np != 0; np--)
-		window_copy_cursor_up(wme, 1);
+	if (data->livemode)
+		window_copy_scroll_down(wme, np);
+	else {
+		for (; np != 0; np--)
+			window_copy_cursor_up(wme, 1);
+	}
 	if (data->livemode && data->oy == old_oy)
 		return (WINDOW_COPY_CMD_NOOP);
 	return (WINDOW_COPY_CMD_NOTHING);
@@ -3926,8 +4121,11 @@ window_copy_command(struct window_mode_entry *wme, struct client *c,
 		    window_copy_line_number_width(wme) == 0 &&
 		    (strcmp(command, "scroll-up") == 0 ||
 		    strcmp(command, "scroll-down") == 0 ||
-		    strcmp(command, "scroll-down-and-cancel") == 0))
+		    strcmp(command, "scroll-down-and-cancel") == 0)) {
+			if (c != NULL)
+				tty_flush(&c->tty);
 			return;
+		}
 		/*
 		 * Nothing is not actually nothing - most commands at least
 		 * move the cursor (what would be the point of a command that
@@ -3936,6 +4134,72 @@ window_copy_command(struct window_mode_entry *wme, struct client *c,
 		 */
 		window_copy_redraw_lines(wme, 0, 1);
 	}
+}
+
+int
+window_copy_fast_live_scroll(struct window_pane *wp, struct client *c,
+    struct session *s, struct winlink *wl, struct mouse_event *m)
+{
+	struct window_mode_entry		*wme;
+	struct window_copy_mode_data	*data;
+	struct window_copy_cmd_state	 cs;
+	enum window_copy_cmd_action	 action;
+	struct args			*args;
+	int				 entered = 0;
+
+	if (wp == NULL || m == NULL || !m->valid || !MOUSE_WHEEL(m->b))
+		return (0);
+	wme = TAILQ_FIRST(&wp->modes);
+	if (wme == NULL && m->newmux_scroll_valid &&
+	    MOUSE_BUTTONS(m->b) == MOUSE_WHEEL_UP &&
+	    screen_hsize(&wp->base) != 0) {
+		args = args_create();
+		args_set(args, 'L', NULL, 0);
+		args_set(args, 'H', NULL, 0);
+		args_set(args, 'e', NULL, 0);
+		if (window_pane_set_mode(wp, wp, &window_copy_mode, NULL,
+		    args) == 0) {
+			window_copy_set_line_numbers(wp, 0);
+			entered = 1;
+		}
+		args_free(args);
+		wme = TAILQ_FIRST(&wp->modes);
+	}
+	if (wme == NULL || wme->mode != &window_copy_mode)
+		return (0);
+	data = wme->data;
+	if (data == NULL || !data->livemode)
+		return (0);
+	if (!entered && (wp->flags & PANE_REDRAW) != 0)
+		return (0);
+	if (!entered && c != NULL && EVBUFFER_LENGTH(c->tty.out) != 0)
+		return (0);
+
+	memset(&cs, 0, sizeof cs);
+	cs.wme = wme;
+	cs.m = m;
+	cs.c = c;
+	cs.s = s;
+	cs.wl = wl;
+
+	if (MOUSE_BUTTONS(m->b) == MOUSE_WHEEL_UP)
+		action = window_copy_cmd_scroll_up(&cs);
+	else
+		action = window_copy_cmd_scroll_down(&cs);
+
+	if (action == WINDOW_COPY_CMD_CANCEL)
+		window_pane_reset_mode(wp);
+	else if (action == WINDOW_COPY_CMD_REDRAW)
+		window_copy_redraw_screen(wme);
+	else if (action == WINDOW_COPY_CMD_NOTHING) {
+		if (!(data->hide_position &&
+		    data->screen.sel == NULL &&
+		    window_copy_line_number_width(wme) == 0))
+			window_copy_redraw_lines(wme, 0, 1);
+	}
+	if (c != NULL)
+		tty_flush(&c->tty);
+	return (1);
 }
 
 static void
@@ -5151,8 +5415,20 @@ window_copy_update_style(struct window_mode_entry *wme, u_int fx, u_int fy,
 	}
 	else {
 		gc->fg = mgc->fg;
-		gc->bg = mgc->bg;
+	gc->bg = mgc->bg;
 	}
+}
+
+static int
+window_copy_cell_is_blank_fill(const struct grid_cell *gc)
+{
+	if (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB))
+		return (0);
+	if (gc->attr != 0)
+		return (0);
+	if (gc->data.size != 1 || gc->data.width != 1)
+		return (0);
+	return (*gc->data.data == ' ');
 }
 
 static void
@@ -5163,11 +5439,45 @@ window_copy_write_one(struct window_mode_entry *wme,
 {
 	struct window_copy_mode_data	*data = wme->data;
 	struct grid			*gd = data->backing->grid;
+	struct grid_line		*gl;
 	struct grid_cell		 gc;
-	u_int		 		 fx;
+	u_int		 		 fx, limit;
+	int				 clear_bg = 8, have_clear = 0;
 
 	screen_write_cursormove(ctx, px, py, 0);
-	for (fx = 0; fx < nx; fx++) {
+	limit = nx;
+	if (!update_styles && data->screen.sel == NULL &&
+	    data->lineflag == LINE_SEL_NONE) {
+		gl = grid_get_line(gd, fy);
+		if (~gl->flags & GRID_LINE_WRAPPED) {
+			limit = gl->cellsize;
+			if (limit > nx)
+				limit = nx;
+			else if (limit < nx)
+				have_clear = 1;
+			while (limit > 0) {
+				grid_get_cell(gd, limit - 1, fy, &gc);
+				if (grid_cells_equal(&gc, &grid_default_cell)) {
+					if (!have_clear) {
+						clear_bg = 8;
+						have_clear = 1;
+					}
+					limit--;
+					continue;
+				}
+				if (!window_copy_cell_is_blank_fill(&gc))
+					break;
+				if (!have_clear) {
+					clear_bg = gc.bg;
+					have_clear = 1;
+				} else if (gc.bg != clear_bg)
+					break;
+				limit--;
+			}
+		}
+	}
+
+	for (fx = 0; fx < limit; fx++) {
 		grid_get_cell(gd, fx, fy, &gc);
 		if (fx + gc.data.width <= nx) {
 			if (update_styles) {
@@ -5177,6 +5487,8 @@ window_copy_write_one(struct window_mode_entry *wme,
 			screen_write_cell(ctx, &gc);
 		}
 	}
+	if (limit < nx)
+		screen_write_clearendofline(ctx, clear_bg);
 }
 
 static int
@@ -5326,7 +5638,8 @@ window_copy_cursormove(struct window_mode_entry *wme,
 		ctx->s->mode &= ~(MODE_CURSOR|MODE_CURSOR_BLINKING|
 		    MODE_CURSOR_BLINKING_SET|MODE_CURSOR_VERY_VISIBLE);
 		screen_write_cursormove(ctx, 0, 0, 0);
-		wme->wp->flags |= PANE_REDRAW;
+		if (old_mode & MODE_CURSOR)
+			wme->wp->flags |= PANE_REDRAW;
 		return;
 	}
 
@@ -5406,6 +5719,20 @@ window_copy_is_live_scrolled(struct window_pane *wp)
 	return (1);
 }
 
+static int
+window_copy_line_has_selection(struct screen *s, u_int py)
+{
+	u_int	px;
+
+	if (s->sel == NULL)
+		return (0);
+	for (px = 0; px < screen_size_x(s); px++) {
+		if (screen_check_selection(s, px, py))
+			return (1);
+	}
+	return (0);
+}
+
 static void
 window_copy_write_line(struct window_mode_entry *wme,
     struct screen_write_ctx *ctx, u_int py)
@@ -5413,6 +5740,7 @@ window_copy_write_line(struct window_mode_entry *wme,
 	struct window_pane		*wp = wme->wp;
 	struct window_copy_mode_data	*data = wme->data;
 	struct screen			*s = &data->screen;
+	struct screen_sel		*saved_sel = NULL;
 	struct options			*oo = wp->window->options;
 	struct grid_cell		 gc, mgc, cgc, mkgc, ln_gc, cur_ln_gc;
 	u_int				 sx = screen_size_x(s);
@@ -5431,6 +5759,11 @@ window_copy_write_line(struct window_mode_entry *wme,
 		content_sx = sx - width;
 	else
 		content_sx = sx;
+
+	if (s->sel != NULL && !window_copy_line_has_selection(s, py)) {
+		saved_sel = s->sel;
+		s->sel = NULL;
+	}
 
 	style_cells = (data->showmark || data->searchmark != NULL);
 	position = 0;
@@ -5503,6 +5836,8 @@ window_copy_write_line(struct window_mode_entry *wme,
 
 	if (ft != NULL)
 		format_free(ft);
+	if (saved_sel != NULL)
+		s->sel = saved_sel;
 }
 
 static void
@@ -5583,6 +5918,7 @@ window_copy_style_changed(struct window_mode_entry *wme)
 {
 	struct window_copy_mode_data	*data = wme->data;
 
+	data->selection_cell_valid = 0;
 	if (data->screen.sel != NULL)
 		window_copy_set_selection(wme, 0, 1);
 	window_copy_redraw_screen(wme);
@@ -5801,15 +6137,44 @@ window_copy_adjust_selection(struct window_mode_entry *wme, u_int *selx,
 }
 
 static int
+window_copy_selection_intersects_screen(struct window_mode_entry *wme)
+{
+	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = &data->screen;
+	u_int				 top, bottom, start, end;
+
+	if (!data->livemode)
+		return (1);
+	if (!window_copy_has_logical_selection(data))
+		return (0);
+
+	if (data->sely < data->endsely) {
+		start = data->sely;
+		end = data->endsely;
+	} else {
+		start = data->endsely;
+		end = data->sely;
+	}
+
+	top = screen_hsize(data->backing) - data->oy;
+	bottom = top + screen_size_y(s) - 1;
+	return (end >= top && start <= bottom);
+}
+
+static int
 window_copy_update_selection(struct window_mode_entry *wme, int may_redraw,
     int no_reset)
 {
 	struct window_copy_mode_data	*data = wme->data;
 	struct screen			*s = &data->screen;
 
-	if (!data->native_sel_active && s->sel == NULL &&
-	    data->lineflag == LINE_SEL_NONE)
+	if (!window_copy_has_logical_selection(data))
 		return (0);
+	if (data->livemode && !window_copy_selection_intersects_screen(wme)) {
+		screen_clear_selection(s);
+		window_copy_hide_history_cursor(wme);
+		return (0);
+	}
 	return (window_copy_set_selection(wme, may_redraw, no_reset));
 }
 
@@ -5834,7 +6199,6 @@ window_copy_set_selection(struct window_mode_entry *wme, int may_redraw,
 	struct window_copy_mode_data	*data = wme->data;
 	struct screen			*s = &data->screen;
 	struct options			*oo = wp->window->options;
-	struct grid_cell		 gc;
 	u_int				 sx, sy, cy, endsx, endsy, clipx;
 	int				 startrelpos, endrelpos;
 	struct format_tree		*ft;
@@ -5855,15 +6219,23 @@ window_copy_set_selection(struct window_mode_entry *wme, int may_redraw,
 	/* Selection is outside of the current screen */
 	if (startrelpos == endrelpos &&
 	    startrelpos != WINDOW_COPY_REL_POS_ON_SCREEN) {
-		screen_hide_selection(s);
+		if (data->livemode) {
+			screen_clear_selection(s);
+			window_copy_hide_history_cursor(wme);
+		} else
+			screen_hide_selection(s);
 		return (0);
 	}
 
 	/* Set colours and selection. */
-	ft = format_create_defaults(NULL, NULL, NULL, NULL, wp);
-	style_apply(&gc, oo, "copy-mode-selection-style", ft);
-	gc.flags |= GRID_FLAG_NOPALETTE;
-	format_free(ft);
+	if (!data->selection_cell_valid) {
+		ft = format_create_defaults(NULL, NULL, NULL, NULL, wp);
+		style_apply(&data->selection_cell, oo,
+		    "copy-mode-selection-style", ft);
+		data->selection_cell.flags |= GRID_FLAG_NOPALETTE;
+		format_free(ft);
+		data->selection_cell_valid = 1;
+	}
 	clipx = window_copy_line_number_width(wme);
 	if (clipx >= screen_size_x(s))
 		clipx = screen_size_x(s) - 1;
@@ -5872,7 +6244,7 @@ window_copy_set_selection(struct window_mode_entry *wme, int may_redraw,
 		endsx = window_copy_cursor_offset(wme, endsx, screen_size_x(s));
 	}
 	screen_set_selection(s, sx, sy, endsx, endsy, data->rectflag,
-	    clipx, data->modekeys, &gc);
+	    clipx, data->modekeys, &data->selection_cell);
 	window_copy_hide_history_cursor(wme);
 
 	if (data->rectflag && may_redraw) {
@@ -5913,7 +6285,7 @@ window_copy_get_selection(struct window_mode_entry *wme, size_t *len)
 	u_int				 firstsx, lastex, restex, restsx, selx;
 	int				 keys;
 
-	if (data->screen.sel == NULL && data->lineflag == LINE_SEL_NONE) {
+	if (!window_copy_has_logical_selection(data)) {
 		buf = window_copy_match_at_cursor(data);
 		if (buf != NULL)
 			*len = strlen(buf);
@@ -6217,6 +6589,7 @@ window_copy_clear_selection(struct window_mode_entry *wme)
 
 	data->native_sel_active = 0;
 	data->native_sel_dragging = 0;
+	data->native_sel_edge = 0;
 	data->cursordrag = CURSORDRAG_NONE;
 	data->lineflag = LINE_SEL_NONE;
 	data->selflag = SEL_CHAR;
@@ -6857,6 +7230,11 @@ window_copy_scroll_up(struct window_mode_entry *wme, u_int ny)
 	if (data->searchmark != NULL && !data->timeout)
 		window_copy_search_marks(wme, NULL, data->searchregex, 1);
 	window_copy_update_selection(wme, 0, 0);
+	if (ny >= screen_size_y(s)) {
+		window_copy_redraw_screen(wme);
+		wp->flags |= PANE_REDRAWSCROLLBAR;
+		return;
+	}
 	if (window_copy_line_numbers_active(wme)) {
 		if (window_copy_line_number_mode(wme) !=
 		    WINDOW_COPY_LINE_NUMBERS_ABSOLUTE) {
@@ -6920,6 +7298,11 @@ window_copy_scroll_down(struct window_mode_entry *wme, u_int ny)
 	if (data->searchmark != NULL && !data->timeout)
 		window_copy_search_marks(wme, NULL, data->searchregex, 1);
 	window_copy_update_selection(wme, 0, 0);
+	if (ny >= screen_size_y(s)) {
+		window_copy_redraw_screen(wme);
+		wp->flags |= PANE_REDRAWSCROLLBAR;
+		return;
+	}
 	if (window_copy_line_numbers_active(wme)) {
 		if (window_copy_line_number_mode(wme) !=
 		    WINDOW_COPY_LINE_NUMBERS_ABSOLUTE) {
@@ -6995,6 +7378,43 @@ window_copy_move_mouse(struct mouse_event *m)
 	window_copy_update_cursor(wme, x, y);
 }
 
+static int
+window_copy_native_drag_outside(struct window_mode_entry *wme,
+    struct mouse_event *m, u_int *xp, u_int *yp)
+{
+	struct window_pane		*wp = wme->wp;
+	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = &data->screen;
+	int				 x, y;
+
+	if (!data->native_sel_dragging)
+		return (0);
+
+	x = (int)(m->x + m->ox);
+	y = (int)(m->y + m->oy);
+	if (m->statusat == 0 && y >= (int)m->statuslines)
+		y -= (int)m->statuslines;
+
+	if (x < wp->xoff)
+		*xp = 0;
+	else if (x >= wp->xoff + (int)wp->sx)
+		*xp = screen_size_x(s) - 1;
+	else
+		*xp = x - wp->xoff;
+
+	if (y < wp->yoff) {
+		*yp = 0;
+		data->native_sel_edge = -1;
+		return (1);
+	}
+	if (y >= wp->yoff + (int)wp->sy) {
+		*yp = screen_size_y(s) - 1;
+		data->native_sel_edge = 1;
+		return (1);
+	}
+	return (0);
+}
+
 void
 window_copy_start_drag(struct client *c, struct mouse_event *m)
 {
@@ -7029,6 +7449,9 @@ window_copy_start_drag(struct client *c, struct mouse_event *m)
 		data->native_sel_active = 1;
 		data->native_sel_dragging = 1;
 		data->native_sel_suppress_cursor = 1;
+		data->native_sel_edge = 0;
+		data->native_sel_edge_x = x;
+		data->native_sel_edge_y = y;
 		data->native_sel_start_x = x;
 		data->native_sel_start_y = yg;
 		data->native_sel_end_x = x;
@@ -7093,17 +7516,32 @@ window_copy_drag_update(struct client *c, struct mouse_event *m)
 	data = wme->data;
 	evtimer_del(&data->dragtimer);
 
-	if (cmd_mouse_at(wp, m, &x, &y, 0) != 0)
-		return;
+	if (cmd_mouse_at(wp, m, &x, &y, 0) != 0) {
+		data->native_sel_edge = 0;
+		if (!window_copy_native_drag_outside(wme, m, &x, &y))
+			return;
+	}
 	x = window_copy_cursor_unoffset(wme, x, screen_size_x(&data->screen));
 	if (data->native_sel_dragging) {
-		if (y == 0)
+		data->native_sel_edge = 0;
+		data->native_sel_edge_x = x;
+		data->native_sel_edge_y = y;
+		if (y <= WINDOW_COPY_DRAG_SCROLL_MARGIN) {
+			data->native_sel_edge = -1;
+			data->native_sel_edge_y = 0;
+			evtimer_add(&data->dragtimer, &tv);
 			window_copy_scroll_down(wme, 1);
-		else if (y == screen_size_y(&data->screen) - 1)
+		} else if (y + WINDOW_COPY_DRAG_SCROLL_MARGIN >=
+		    screen_size_y(&data->screen) - 1) {
+			data->native_sel_edge = 1;
+			data->native_sel_edge_y = screen_size_y(&data->screen) - 1;
+			evtimer_add(&data->dragtimer, &tv);
 			window_copy_scroll_up(wme, 1);
+		}
 		data->native_sel_end_x = x;
 		data->native_sel_end_y =
-		    screen_hsize(data->backing) + y - data->oy;
+		    screen_hsize(data->backing) + data->native_sel_edge_y -
+		    data->oy;
 		window_copy_native_selection_sync(wme, 0);
 		window_copy_redraw_screen(wme);
 		return;
@@ -7147,6 +7585,7 @@ window_copy_drag_release(struct client *c, struct mouse_event *m)
 	data = wme->data;
 	if (data->native_sel_dragging) {
 		data->native_sel_dragging = 0;
+		data->native_sel_edge = 0;
 		evtimer_del(&data->dragtimer);
 		return;
 	}

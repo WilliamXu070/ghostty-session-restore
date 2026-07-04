@@ -1,0 +1,287 @@
+{
+  "name": "cmd-shift-t-restore-local-order-complex",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "rename_window",
+      "from": "start",
+      "target": "window_index:0",
+      "name": "alpha"
+    },
+    {
+      "do": "cmd_t",
+      "from": "start"
+    },
+    {
+      "do": "snapshot",
+      "as": "made_beta"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_beta",
+      "target": "window_index:1",
+      "name": "beta"
+    },
+    {
+      "do": "cmd_t",
+      "from": "made_beta"
+    },
+    {
+      "do": "snapshot",
+      "as": "made_gamma"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_gamma",
+      "target": "window_index:2",
+      "name": "gamma"
+    },
+    {
+      "do": "cmd_t",
+      "from": "made_gamma"
+    },
+    {
+      "do": "snapshot",
+      "as": "made_delta"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_delta",
+      "target": "window_index:3",
+      "name": "delta"
+    },
+    {
+      "do": "cmd_t",
+      "from": "made_delta"
+    },
+    {
+      "do": "snapshot",
+      "as": "made_epsilon"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_epsilon",
+      "target": "window_index:4",
+      "name": "epsilon"
+    },
+    {
+      "do": "snapshot",
+      "as": "seeded_names"
+    },
+    {
+      "do": "send_keys",
+      "from": "seeded_names",
+      "target": "window_name:beta",
+      "keys": [
+        "printf beta-seed",
+        "Enter"
+      ]
+    },
+    {
+      "do": "send_keys",
+      "from": "seeded_names",
+      "target": "window_name:gamma",
+      "keys": [
+        "printf gamma-seed",
+        "Enter"
+      ]
+    },
+    {
+      "do": "send_keys",
+      "from": "seeded_names",
+      "target": "window_name:delta",
+      "keys": [
+        "printf delta-seed",
+        "Enter"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "dirty_seeded"
+    },
+    {
+      "do": "cmd_w",
+      "from": "dirty_seeded",
+      "target": "window_name:beta"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_delete_beta"
+    },
+    {
+      "do": "cmd_w",
+      "from": "after_delete_beta",
+      "target": "window_name:delta"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_delete_delta"
+    },
+    {
+      "do": "cmd_w",
+      "from": "after_delete_delta",
+      "target": "window_name:gamma"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_delete_gamma"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_restore_gamma"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_restore_delta"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_restore_beta"
+    }
+  ],
+  "expect": [
+    {
+      "state": "seeded_names",
+      "workspaces": 1,
+      "windows": 5,
+      "panes": 5,
+      "primary_window_names": [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "dirty_seeded",
+      "dirty_windows": 3,
+      "dirty_panes": 3
+    },
+    {
+      "state": "after_delete_beta",
+      "windows": 4,
+      "lifo": 1,
+      "primary_window_names": [
+        "alpha",
+        "gamma",
+        "delta",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "after_delete_delta",
+      "windows": 3,
+      "lifo": 2,
+      "primary_window_names": [
+        "alpha",
+        "gamma",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "after_delete_gamma",
+      "windows": 2,
+      "lifo": 3,
+      "primary_window_names": [
+        "alpha",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "after_restore_gamma",
+      "windows": 3,
+      "lifo": 2,
+      "primary_window_names": [
+        "alpha",
+        "gamma",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "after_restore_delta",
+      "windows": 4,
+      "lifo": 1,
+      "primary_window_names": [
+        "alpha",
+        "gamma",
+        "delta",
+        "epsilon"
+      ]
+    },
+    {
+      "state": "after_restore_beta",
+      "windows": 5,
+      "lifo": 0,
+      "primary_window_names": [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "epsilon"
+      ]
+    }
+  ]
+}

@@ -673,6 +673,12 @@ extension Ghostty {
             // Command keyUp events are never sent to the normal responder chain
             // so we send them here.
             guard focused else { return event }
+            if let key = Ghostty.Input.Key(keyCode: event.keyCode), key == .w {
+                NotificationCenter.default.post(
+                    name: .ghosttyNewmuxCloseTabHoldRelease,
+                    object: window?.windowController
+                )
+            }
             self.keyUp(with: event)
             return nil
         }

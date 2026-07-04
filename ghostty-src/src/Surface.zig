@@ -3543,16 +3543,28 @@ pub fn scrollCallback(
 
         // If we're scrolling up or down, then send a mouse event.
         if (self.isMouseReporting()) {
-            if (y.delta != 0 or x.delta != 0)
-                self.newmuxMouseScrollReport(xoff, yoff, x.delta, y.delta,
-                    scroll_mods);
-
-            for (0..@abs(y.delta)) |_| {
+            const handled_newmux_vertical = y.delta != 0;
+            if (handled_newmux_vertical) {
                 const pos = try self.rt_surface.getCursorPos();
-                self.mouseReport(switch (y.direction()) {
-                    .up_right => .four,
-                    .down_left => .five,
-                }, .press, self.mouse.mods, pos);
+                const cell = self.posToViewport(pos.x, pos.y);
+                self.newmuxMouseScrollReport(
+                    xoff,
+                    yoff,
+                    x.delta,
+                    y.delta,
+                    scroll_mods,
+                    cell,
+                );
+            }
+
+            if (!handled_newmux_vertical) {
+                for (0..@abs(y.delta)) |_| {
+                    const pos = try self.rt_surface.getCursorPos();
+                    self.mouseReport(switch (y.direction()) {
+                        .up_right => .four,
+                        .down_left => .five,
+                    }, .press, self.mouse.mods, pos);
+                }
             }
 
             for (0..@abs(x.delta)) |_| {
@@ -3586,6 +3598,7 @@ fn newmuxMouseScrollReport(
     xdelta: isize,
     ydelta: isize,
     scroll_mods: input.ScrollMods,
+    cell: terminal.point.Coordinate,
 ) void {
     var data: termio.Message.WriteReq.Small.Array = undefined;
     var writer: std.Io.Writer = .fixed(&data);
@@ -3595,13 +3608,15 @@ fn newmuxMouseScrollReport(
     const precision: u8 = if (scroll_mods.precision) 1 else 0;
     const momentum: u8 = @intFromEnum(scroll_mods.momentum);
 
-    writer.print("\x1b[?7777;{d};{d};{d};{d};{d};{d}~", .{
+    writer.print("\x1b[?7777;{d};{d};{d};{d};{d};{d};{d};{d}~", .{
         yoff_milli,
         xoff_milli,
         ydelta,
         xdelta,
         precision,
         momentum,
+        cell.x,
+        cell.y,
     }) catch |err| switch (err) {
         error.WriteFailed => {
             log.warn("failed to encode newmux scroll event err={}", .{err});
@@ -5283,6 +5298,24 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .newmux_new_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_new_tab,
+            apprt.action.NewmuxTab.default,
+        ),
+
+        .newmux_close_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_close_tab,
+            {},
+        ),
+
+        .newmux_restore_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .newmux_restore_tab,
+            {},
+        ),
+
         .close_tab => |v| return try self.rt_app.performAction(
             .{ .surface = self },
             .close_tab,
@@ -5650,6 +5683,7 @@ fn closingAction(action: input.Binding.Action) bool {
         .close_surface,
         .close_window,
         .close_tab,
+        .newmux_close_tab,
         => true,
 
         else => false,

@@ -1285,6 +1285,7 @@ struct window_pane {
 #define PANE_THEMECHANGED 0x2000
 #define PANE_UNSEENCHANGES 0x4000
 #define PANE_REDRAWSCROLLBAR 0x8000
+#define PANE_NEWMUX_HISTORY_PROTECTED 0x10000
 
 	u_int		 sb_slider_y;
 	u_int		 sb_slider_h;
@@ -2086,13 +2087,6 @@ struct client {
 	u_int			 click_button;
 	struct mouse_event	 click_event;
 
-	int			 newmux_scroll_pending_valid;
-	u_int			 newmux_scroll_pending_ticks;
-	u_int			 newmux_scroll_pending_lines_milli;
-	int			 newmux_scroll_pending_precision;
-	int			 newmux_scroll_pending_momentum;
-	u_int			 newmux_scroll_skip;
-
 	struct status_line	 status;
 	enum client_theme	 theme;
 
@@ -2736,6 +2730,7 @@ void	tty_close(struct tty *);
 void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
+void	tty_flush(struct tty *);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
 void	tty_cmd_alignmenttest(struct tty *, const struct tty_ctx *);
@@ -3641,6 +3636,8 @@ char		*window_copy_get_line(struct window_pane *, u_int);
 int		 window_copy_get_current_offset(struct window_pane *, u_int *,
 		     u_int *);
 int		 window_copy_is_live_scrolled(struct window_pane *);
+int		 window_copy_fast_live_scroll(struct window_pane *, struct client *,
+		     struct session *, struct winlink *, struct mouse_event *);
 char		*window_copy_get_hyperlink(struct window_pane *, u_int, u_int);
 void		 window_copy_set_line_numbers(struct window_pane *, int);
 

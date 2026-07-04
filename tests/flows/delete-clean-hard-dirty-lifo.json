@@ -1,0 +1,113 @@
+{
+  "name": "delete-clean-hard-dirty-lifo",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "cmd_t",
+      "from": "start"
+    },
+    {
+      "do": "snapshot",
+      "as": "clean_tab"
+    },
+    {
+      "do": "cmd_w",
+      "from": "clean_tab",
+      "target": "latest_window"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_clean_delete"
+    },
+    {
+      "do": "cmd_t",
+      "from": "after_clean_delete"
+    },
+    {
+      "do": "snapshot",
+      "as": "dirty_tab_clean_baseline"
+    },
+    {
+      "do": "send_keys",
+      "from": "dirty_tab_clean_baseline",
+      "target": "latest_window",
+      "keys": [
+        "printf 'newmux-dirty-flow'",
+        "Enter"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "dirty_tab"
+    },
+    {
+      "do": "cmd_w",
+      "from": "dirty_tab",
+      "target": "latest_window"
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "after_dirty_delete"
+    }
+  ],
+  "expect": [
+    {
+      "state": "start",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "state": "clean_tab",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "dirty_windows": 0,
+      "dirty_panes": 0,
+      "lifo": 0
+    },
+    {
+      "state": "after_clean_delete",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 0
+    },
+    {
+      "state": "dirty_tab",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "dirty_windows": 1,
+      "dirty_panes": 1,
+      "lifo": 0
+    },
+    {
+      "state": "after_dirty_delete",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 1
+    }
+  ]
+}

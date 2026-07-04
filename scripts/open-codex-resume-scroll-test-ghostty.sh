@@ -27,11 +27,13 @@ cp "$REAL_PROFILE" "$TMP_CONFIG"
 
 perl -0pi -e '
 	s/^title = .*$/title = Newmux Codex Resume Scroll Test/m;
-	s#^input = raw:.*$#input = raw:NEWMUX_SOCKET='"$SOCKET_NAME"' exec '"$ROOT"'/scripts/start-newmux-codex-resume-test.sh\\r#m;
+	s#^input = raw:.*\n##mg;
+	s#^command = .*$#command = /bin/zsh\ninput = raw:NEWMUX_SOCKET='"$SOCKET_NAME"' exec '"$ROOT"'/scripts/start-newmux-codex-resume-test.sh\\r#m;
 ' "$TMP_CONFIG"
 
 CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.cache"}
-PATCHED_GHOSTTY_APP=${NEWMUX_GHOSTTY_APP:-"$CACHE_HOME/newmux/ghostty-macos-build/Debug/Ghostty.app"}
+GHOSTTY_CONFIGURATION=${NEWMUX_GHOSTTY_CONFIGURATION:-ReleaseLocal}
+PATCHED_GHOSTTY_APP=${NEWMUX_GHOSTTY_APP:-"$CACHE_HOME/newmux/ghostty-macos-build/$GHOSTTY_CONFIGURATION/Ghostty.app"}
 PATCHED_GHOSTTY_BIN="$PATCHED_GHOSTTY_APP/Contents/MacOS/ghostty"
 USE_PATCHED_GHOSTTY=${NEWMUX_USE_PATCHED_GHOSTTY:-0}
 

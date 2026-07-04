@@ -114,6 +114,7 @@ dist_tmux_SOURCES = \
 	commands/cmd-lock-server.c \
 	commands/cmd-move-window.c \
 	commands/cmd-new-session.c \
+	commands/cmd-newmux-recovery.c \
 	commands/cmd-new-window.c \
 	commands/cmd-parse.y \
 	commands/cmd-paste-buffer.c \

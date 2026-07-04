@@ -1,0 +1,96 @@
+{
+  "name": "cmd-t-w-background-burst-no-buffer",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_start"
+    },
+    {
+      "do": "ghostty_action_burst",
+      "action": "newmux_new_tab",
+      "count": 18,
+      "interval": 0.02
+    },
+    {
+      "do": "wait",
+      "seconds": 1.2
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_t_burst"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_t_burst"
+    },
+    {
+      "do": "ghostty_action_burst",
+      "action": "newmux_close_tab",
+      "count": 48,
+      "interval": 0.02
+    },
+    {
+      "do": "wait",
+      "seconds": 1.2
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_w_burst"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_w_burst"
+    }
+  ],
+  "expect": [
+    {
+      "state": "start",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1
+    },
+    {
+      "ui_state": "ui_start",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    },
+    {
+      "state": "after_cmd_t_burst",
+      "workspaces": 1,
+      "windows_min": 2,
+      "windows_max": 19,
+      "panes_min": 2,
+      "panes_max": 19,
+      "raw_sessions_max": 19
+    },
+    {
+      "ui_state": "ui_after_cmd_t_burst",
+      "native_tabs_min": 2,
+      "native_tabs_max": 19,
+      "rail_tabs_min": 2,
+      "rail_tabs_max": 19
+    },
+    {
+      "state": "after_cmd_w_burst",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1
+    },
+    {
+      "ui_state": "ui_after_cmd_w_burst",
+      "native_tabs": 1,
+      "rail_tabs": 1
+    }
+  ]
+}

@@ -8,34 +8,21 @@ TARGET=${1:-newmux-codex-resume:main}
 SCROLL_LINES=${SCROLL_LINES:-6}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-45}
 CAPTURE_FILE="${TMPDIR:-/tmp}/newmux-codex-resume-stage-$$.txt"
+SEED_FILE=${CODEX_RESUME_SEED_FILE:-"$ROOT/.local/codex-resume-scroll-test/latest/seeded"}
 
 wait_for_codex_resume()
 {
 	i=0
 	limit=$((TIMEOUT_SECONDS * 2))
 	while [ "$i" -lt "$limit" ]; do
-		if "$NEWMUX" -L "$SOCKET_NAME" wait-for -L 2>/dev/null |
-		    grep -q '^codex-resume-seeded$'; then
-			break
+		if [ -f "$SEED_FILE" ]; then
+			return
 		fi
 		sleep 0.5
 		i=$((i + 1))
 	done
 
-	i=0
-	while [ "$i" -lt "$limit" ]; do
-		if "$NEWMUX" -L "$SOCKET_NAME" capture-pane -p -t "$TARGET" \
-		    >"$CAPTURE_FILE" 2>/dev/null; then
-			if grep -Eq 'OpenAI Codex|/resume|Resume|codex' \
-			    "$CAPTURE_FILE"; then
-				return
-			fi
-		fi
-		sleep 0.5
-		i=$((i + 1))
-	done
-
-	echo "Codex /resume screen did not appear within ${TIMEOUT_SECONDS}s" >&2
+	echo "Codex /resume keystroke seed did not finish within ${TIMEOUT_SECONDS}s" >&2
 	exit 1
 }
 

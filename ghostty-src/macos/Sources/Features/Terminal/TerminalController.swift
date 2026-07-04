@@ -58,14 +58,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig
 
+    /// Newmux backend window represented by this native tab, when launched
+    /// through the Newmux-native tab actions.
+    private(set) var newmuxWindowId: String?
+    private(set) var newmuxPendingWindowToken: String?
+    private(set) var newmuxPendingWindowDirectory: String?
+
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
+
+    /// Tracks the "hold to delete the last remaining tab requires fresh press" flow.
+    private var pendingNewmuxCloseHold = false
+    private var newmuxCloseHoldReleaseObserved = false
 
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
          parent: NSWindow? = nil
     ) {
+        self.newmuxWindowId = base?.environmentVariables["NEWMUX_ATTACH_WINDOW"]
+        self.newmuxPendingWindowToken = base?.environmentVariables["NEWMUX_ATTACH_PENDING_TOKEN"]
+        self.newmuxPendingWindowDirectory = base?.environmentVariables["NEWMUX_ATTACH_PENDING_DIR"]
+
         // The window we manage is not restorable if we've specified a command
         // to execute. We do this because the restored window is meaningless at the
         // time of writing this: it'd just restore to a shell in the same directory
@@ -133,6 +147,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             name: .ghosttyCloseWindow,
             object: nil
         )
+        center.addObserver(
+            self,
+            selector: #selector(onNewmuxCloseTabHoldRelease(_:)),
+            name: .ghosttyNewmuxCloseTabHoldRelease,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -164,6 +184,51 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let workItem = scheduledWorkItem!
         pendingInitialPresentation = workItem
         DispatchQueue.main.async(execute: workItem)
+    }
+
+    func bindNewmuxPendingWindow(token: String, directory: String) {
+        guard !token.isEmpty, !directory.isEmpty, !token.contains("/") else { return }
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("\(token).window")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                if let text = try? String(contentsOf: url, encoding: .utf8) {
+                    let windowId = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if windowId.hasPrefix("@") {
+                        DispatchQueue.main.async {
+                            self?.newmuxWindowId = windowId
+                            self?.newmuxPendingWindowToken = nil
+                            self?.newmuxPendingWindowDirectory = nil
+                        }
+                        Self.cleanupNewmuxPendingFiles(token: token, directory: directory, delay: 2)
+                        return
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            Self.cleanupNewmuxPendingFiles(token: token, directory: directory, delay: 0)
+        }
+    }
+
+    private static func cleanupNewmuxPendingFiles(token: String, directory: String, delay: TimeInterval) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            let base = URL(fileURLWithPath: directory)
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).window"))
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).sequence"))
+            try? FileManager.default.removeItem(at: base.appendingPathComponent("\(token).cancelled"))
+        }
+    }
+
+    func resolvedNewmuxPendingWindowId() -> String? {
+        guard let token = newmuxPendingWindowToken,
+              let directory = newmuxPendingWindowDirectory,
+              !token.isEmpty,
+              !directory.isEmpty,
+              !token.contains("/") else { return nil }
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("\(token).window")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let windowId = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return windowId.hasPrefix("@") ? windowId : nil
     }
 
     // MARK: Base Controller Overrides
@@ -407,13 +472,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func newTab(
         _ ghostty: Ghostty.App,
         from parent: NSWindow? = nil,
-        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        insertAt: Int? = nil,
+        extraEnvironment: [String: String] = [:]
     ) -> TerminalController? {
+        var resolvedBaseConfig = baseConfig
+        if !extraEnvironment.isEmpty {
+            var config = resolvedBaseConfig ?? Ghostty.SurfaceConfiguration()
+            for (key, value) in extraEnvironment {
+                config.environmentVariables[key] = value
+            }
+            resolvedBaseConfig = config
+        }
+
         // Making sure that we're dealing with a TerminalController. If not,
         // then we just create a new window.
         guard let parent,
               let parentController = parent.windowController as? TerminalController else {
-            return newWindow(ghostty, withBaseConfig: baseConfig, withParent: parent)
+            return newWindow(ghostty, withBaseConfig: resolvedBaseConfig, withParent: parent)
         }
 
         // If our parent is in non-native fullscreen, then new tabs do not work.
@@ -430,7 +506,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let controller = TerminalController.init(ghostty, withBaseConfig: resolvedBaseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         guard let window = controller.window else { return controller }
 
@@ -452,20 +528,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // If we don't allow tabs then we create a new window instead.
         if window.tabbingMode != .disallowed {
-            // Add the window to the tab group and show it.
-            switch ghostty.config.windowNewTabPosition {
-            case "end":
-                // If we already have a tab group and we want the new tab to open at the end,
-                // then we use the last window in the tab group as the parent.
-                if let last = parent.tabGroup?.windows.last {
-                    last.addTabbedWindowSafely(window, ordered: .above)
-                } else {
-                    fallthrough
-                }
+            if let insertAt {
+                addTabbedWindow(window, to: parent, insertAt: insertAt)
+            } else {
+                // Add the window to the tab group and show it.
+                switch ghostty.config.windowNewTabPosition {
+                case "end":
+                    // If we already have a tab group and we want the new tab to open at the end,
+                    // then we use the last window in the tab group as the parent.
+                    if let last = parent.tabGroup?.windows.last {
+                        last.addTabbedWindowSafely(window, ordered: .above)
+                    } else {
+                        fallthrough
+                    }
 
-            case "current": fallthrough
-            default:
-                parent.addTabbedWindowSafely(window, ordered: .above)
+                case "current": fallthrough
+                default:
+                    parent.addTabbedWindowSafely(window, ordered: .above)
+                }
             }
         }
 
@@ -521,12 +601,32 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     _ = TerminalController.newTab(
                         ghostty,
                         from: parent,
-                        withBaseConfig: baseConfig)
+                        withBaseConfig: resolvedBaseConfig,
+                        insertAt: insertAt)
                 }
             }
         }
 
         return controller
+    }
+
+    private static func addTabbedWindow(
+        _ window: NSWindow,
+        to parent: NSWindow,
+        insertAt rawIndex: Int
+    ) {
+        guard let tabGroup = parent.tabGroup, !tabGroup.windows.isEmpty else {
+            parent.addTabbedWindowSafely(window, ordered: .above)
+            return
+        }
+
+        let windows = tabGroup.windows
+        let index = min(max(rawIndex, 0), windows.count)
+        if index < windows.count {
+            windows[index].addTabbedWindowSafely(window, ordered: .below)
+        } else {
+            windows.last?.addTabbedWindowSafely(window, ordered: .above)
+        }
     }
 
     // MARK: - Methods
@@ -1079,7 +1179,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Initialize our content view to the SwiftUI root
         let container = TerminalViewContainer {
-            TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            if NewmuxUIFlag.enabled || NewmuxUIFlag.statusEnabled {
+                NewmuxRootView {
+                    TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+                }
+            } else {
+                TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+            }
         }
 
         // Set the initial content size on the container so that
@@ -1271,10 +1377,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction func newTab(_ sender: Any?) {
         guard let surface = focusedSurface?.surface else { return }
+        if ghostty.config.keyboardShortcut(for: "newmux_new_tab") != nil {
+            ghostty.newmuxNewTab(surface: surface)
+            return
+        }
         ghostty.newTab(surface: surface)
     }
 
     @IBAction func closeTab(_ sender: Any?) {
+        if ghostty.config.keyboardShortcut(for: "newmux_close_tab") != nil,
+           let surface = focusedSurface?.surface {
+            ghostty.newmuxCloseTab(surface: surface)
+            return
+        }
+
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {
             closeWindow(sender)
@@ -1549,7 +1665,43 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @objc private func onCloseTab(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }
+        if notification.userInfo?[Ghostty.Notification.NewmuxBackendDeletedKey] as? Bool == true {
+            guard let window else { return }
+            let visibleTabs = window.tabGroup?.windows.count ?? 0
+
+            if pendingNewmuxCloseHold {
+                if visibleTabs > 2 {
+                    pendingNewmuxCloseHold = false
+                    newmuxCloseHoldReleaseObserved = false
+                } else if !newmuxCloseHoldReleaseObserved {
+                    return
+                } else {
+                    pendingNewmuxCloseHold = false
+                    newmuxCloseHoldReleaseObserved = false
+                    closeWindowImmediately()
+                    return
+                }
+            }
+
+            guard visibleTabs > 1 else {
+                closeWindowImmediately()
+                return
+            }
+
+            if visibleTabs == 2 {
+                pendingNewmuxCloseHold = true
+            }
+            closeTabImmediately(registerRedo: false)
+            return
+        }
         closeTab(self)
+    }
+
+    @objc private func onNewmuxCloseTabHoldRelease(_ notification: Notification) {
+        guard let target = notification.object as? TerminalController else { return }
+        guard target == self else { return }
+        guard pendingNewmuxCloseHold else { return }
+        newmuxCloseHoldReleaseObserved = true
     }
 
     @objc private func onCloseOtherTabs(notification: SwiftUI.Notification) {

@@ -343,6 +343,16 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// Newmux-native tab creation entry point. The request payload lets
+    /// the app runtime place the native tab and pass backend attach metadata.
+    newmux_new_tab: NewmuxTab,
+
+    /// Newmux-native tab close entry point.
+    newmux_close_tab,
+
+    /// Newmux-native tab restore entry point.
+    newmux_restore_tab,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -410,6 +420,9 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        newmux_new_tab,
+        newmux_close_tab,
+        newmux_restore_tab,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -547,6 +560,19 @@ pub const ResizeSplit = extern struct {
 
 pub const MoveTab = extern struct {
     amount: isize,
+};
+
+pub const NewmuxTab = extern struct {
+    /// Target zero-based insertion index. Negative means use normal tab policy.
+    insert_at: isize,
+
+    /// Newmux backend window identifier to expose as NEWMUX_ATTACH_WINDOW.
+    attach_window: ?[*:0]const u8,
+
+    pub const default: NewmuxTab = .{
+        .insert_at = -1,
+        .attach_window = null,
+    };
 };
 
 /// The tab to jump to. This is non-exhaustive so that integer values represent

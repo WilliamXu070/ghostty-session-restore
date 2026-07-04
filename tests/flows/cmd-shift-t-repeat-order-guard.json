@@ -1,0 +1,247 @@
+{
+  "name": "cmd-shift-t-repeat-order-guard",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2,
+    "env": {
+      "NEWMUX_GHOSTTY_UI_STATUS": "1"
+    }
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "start"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_start"
+    },
+    {
+      "do": "rename_window",
+      "from": "start",
+      "target": "window_index:0",
+      "name": "alpha"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "made_beta"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_beta",
+      "target": "window_index:1",
+      "name": "beta"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "made_gamma"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_made_gamma"
+    },
+    {
+      "do": "rename_window",
+      "from": "made_gamma",
+      "target": "window_index:2",
+      "name": "gamma"
+    },
+    {
+      "do": "snapshot",
+      "as": "named"
+    },
+    {
+      "do": "send_keys",
+      "from": "named",
+      "target": "window_name:beta",
+      "keys": [
+        "printf beta-repeat-seed",
+        "Enter"
+      ]
+    },
+    {
+      "do": "send_keys",
+      "from": "named",
+      "target": "window_name:gamma",
+      "keys": [
+        "printf gamma-repeat-seed",
+        "Enter"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "snapshot",
+      "as": "dirty"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "w",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 1.5
+    },
+    {
+      "do": "snapshot",
+      "as": "after_delete_two"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_delete_two"
+    },
+    {
+      "do": "physical_shortcut_repeat",
+      "key": "t",
+      "modifiers": [
+        "command down",
+        "shift down"
+      ],
+      "count": 6,
+      "interval": 0.03
+    },
+    {
+      "do": "wait",
+      "seconds": 3
+    },
+    {
+      "do": "snapshot",
+      "as": "after_repeat_restore"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_repeat_restore"
+    },
+    {
+      "do": "physical_shortcut",
+      "key": "t",
+      "modifiers": [
+        "command down"
+      ]
+    },
+    {
+      "do": "wait",
+      "seconds": 4
+    },
+    {
+      "do": "snapshot",
+      "as": "after_cmd_t"
+    },
+    {
+      "do": "ui_snapshot",
+      "as": "ui_after_cmd_t"
+    }
+  ],
+  "expect": [
+    {
+      "ui_state": "ui_start",
+      "native_tabs": 1,
+      "rail_tabs": 1,
+      "active_native_tab_index": 0
+    },
+    {
+      "state": "named",
+      "workspaces": 1,
+      "windows": 3,
+      "panes": 3,
+      "primary_window_names": [
+        "alpha",
+        "beta",
+        "gamma"
+      ]
+    },
+    {
+      "ui_state": "ui_made_gamma",
+      "native_tabs": 3,
+      "rail_tabs": 3,
+      "active_native_tab_index": 2
+    },
+    {
+      "state": "dirty",
+      "dirty_windows": 2,
+      "dirty_panes": 2
+    },
+    {
+      "state": "after_delete_two",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1,
+      "lifo": 2
+    },
+    {
+      "ui_state": "ui_after_delete_two",
+      "native_tabs": 1,
+      "rail_tabs": 1,
+      "active_native_tab_index": 0
+    },
+    {
+      "state": "after_repeat_restore",
+      "workspaces": 1,
+      "windows": 3,
+      "panes": 3,
+      "lifo": 0,
+      "primary_window_names": [
+        "alpha",
+        "beta",
+        "gamma"
+      ]
+    },
+    {
+      "ui_state": "ui_after_repeat_restore",
+      "native_tabs": 3,
+      "rail_tabs": 3,
+      "active_native_tab_index": 2
+    },
+    {
+      "state": "after_cmd_t",
+      "workspaces": 1,
+      "windows": 4,
+      "panes": 4,
+      "lifo": 0
+    },
+    {
+      "ui_state": "ui_after_cmd_t",
+      "native_tabs": 4,
+      "rail_tabs": 4,
+      "active_native_tab_index": 3
+    }
+  ]
+}

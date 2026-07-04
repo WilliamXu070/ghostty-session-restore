@@ -351,6 +351,9 @@ extension Notification.Name {
     /// Close tabs to the right of the focused tab
     static let ghosttyCloseTabsOnTheRight = Notification.Name("com.mitchellh.ghostty.closeTabsOnTheRight")
 
+    /// Released the key that triggered `newmux_close_tab` in this tab window.
+    static let ghosttyNewmuxCloseTabHoldRelease = Notification.Name("com.mitchellh.ghostty.newmuxCloseTabHoldRelease")
+
     /// Close window
     static let ghosttyCloseWindow = Notification.Name("com.mitchellh.ghostty.closeWindow")
 
@@ -399,6 +402,12 @@ extension Ghostty.Notification {
 
     /// New tab. Has base surface config requested in userinfo.
     static let ghosttyNewTab = Notification.Name("com.mitchellh.ghostty.newTab")
+    static let NewmuxTabInsertAtKey = "com.mitchellh.ghostty.newmuxTab.insertAt"
+    static let NewmuxTabEnvironmentKey = "com.mitchellh.ghostty.newmuxTab.environment"
+    static let NewmuxBackendDeletedKey = "com.mitchellh.ghostty.newmuxTab.backendDeleted"
+
+    /// Newmux restore tab hook. Backend integration is owned separately.
+    static let ghosttyNewmuxRestoreTab = Notification.Name("com.mitchellh.ghostty.newmuxRestoreTab")
 
     /// New window. Has base surface config requested in userinfo.
     static let ghosttyNewWindow = Notification.Name("com.mitchellh.ghostty.newWindow")

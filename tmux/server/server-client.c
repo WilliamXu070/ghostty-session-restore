@@ -1223,6 +1223,7 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	if (!KEYC_IS_MOUSE(key) || cmd_find_from_mouse(&fs, m, 0) != 0)
 		cmd_find_from_client(&fs, c, 0);
 	wp = fs.wp;
+	wme = NULL;
 
 	/* Forward mouse keys if disabled. */
 	if (KEYC_IS_MOUSE(key) && !options_get_number(s->options, "mouse"))
@@ -1284,6 +1285,10 @@ table_changed:
 		window_pane_reset_mode(wp);
 		goto forward_key;
 	}
+
+	if (KEYC_IS_MOUSE(key) && m->valid && MOUSE_WHEEL(m->b) &&
+	    window_copy_fast_live_scroll(wp, c, s, wl, m))
+		goto out;
 	flags = c->flags;
 
 try_again:
@@ -1542,11 +1547,12 @@ server_client_loop(void)
 	TAILQ_FOREACH(c, &clients, entry) {
 		server_client_check_exit(c);
 		if (c->session != NULL && c->session->curw != NULL) {
-			server_client_check_modes(c);
-			server_client_check_redraw(c);
-			server_client_reset_state(c);
+				server_client_check_modes(c);
+				server_client_check_redraw(c);
+				server_client_reset_state(c);
+				tty_flush(&c->tty);
+			}
 		}
-	}
 
 	/*
 	 * Any windows will have been redrawn as part of clients, so clear

@@ -239,13 +239,20 @@ tty_block_maybe(struct tty *tty)
 	return (1);
 }
 
-static void
-tty_write_callback(__unused int fd, __unused short events, void *data)
+void
+tty_flush(struct tty *tty)
 {
-	struct tty	*tty = data;
 	struct client	*c = tty->client;
 	size_t		 size = EVBUFFER_LENGTH(tty->out);
 	int		 nwrite;
+
+	if (c == NULL || (~c->flags & CLIENT_TERMINAL) ||
+	    (~tty->flags & TTY_STARTED))
+		return;
+	if (size == 0) {
+		event_del(&tty->event_out);
+		return;
+	}
 
 	nwrite = evbuffer_write(tty->out, c->fd);
 	if (nwrite == -1)
@@ -264,6 +271,14 @@ tty_write_callback(__unused int fd, __unused short events, void *data)
 
 	if (EVBUFFER_LENGTH(tty->out) != 0)
 		event_add(&tty->event_out, NULL);
+	else
+		event_del(&tty->event_out);
+}
+
+static void
+tty_write_callback(__unused int fd, __unused short events, void *data)
+{
+	tty_flush(data);
 }
 
 int

@@ -1,0 +1,49 @@
+{
+  "name": "cmd-t-new-tab-same-server",
+  "setup": {
+    "type": "fresh-ghostty",
+    "wait": 2
+  },
+  "steps": [
+    {
+      "do": "snapshot",
+      "as": "before"
+    },
+    {
+      "do": "cmd_t",
+      "from": "before"
+    },
+    {
+      "do": "wait",
+      "seconds": 2
+    },
+    {
+      "do": "snapshot",
+      "as": "after"
+    }
+  ],
+  "expect": [
+    {
+      "state": "before",
+      "workspaces": 1,
+      "windows": 1,
+      "panes": 1
+    },
+    {
+      "state": "after",
+      "workspaces": 1,
+      "windows": 2,
+      "panes": 2,
+      "raw_sessions_min": 2
+    },
+    {
+      "delta": {
+        "from": "before",
+        "to": "after"
+      },
+      "workspaces": 0,
+      "windows": 1,
+      "panes": 1
+    }
+  ]
+}

@@ -723,8 +723,22 @@ class AppDelegate: NSObject,
 
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
+        let insertAt = notification.userInfo?[Ghostty.Notification.NewmuxTabInsertAtKey] as? Int
+        let extraEnvironment = (
+            notification.userInfo?[Ghostty.Notification.NewmuxTabEnvironmentKey] as? [String: String]
+        ) ?? [:]
 
-        _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        let controller = TerminalController.newTab(
+            ghostty,
+            from: window,
+            withBaseConfig: config,
+            insertAt: insertAt,
+            extraEnvironment: extraEnvironment
+        )
+        if let token = extraEnvironment["NEWMUX_ATTACH_PENDING_TOKEN"],
+           let directory = extraEnvironment["NEWMUX_ATTACH_PENDING_DIR"] {
+            controller?.bindNewmuxPendingWindow(token: token, directory: directory)
+        }
     }
 
     private func setDockBadge() {
@@ -943,6 +957,12 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
+        if ghostty.config.keyboardShortcut(for: "newmux_new_tab") != nil,
+           let surface = TerminalController.preferredParent?.focusedSurface?.surface {
+            ghostty.newmuxNewTab(surface: surface)
+            return
+        }
+
         _ = TerminalController.newTab(
             ghostty,
             from: TerminalController.preferredParent?.window

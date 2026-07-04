@@ -337,7 +337,7 @@ const struct options_table_entry options_table[] = {
 	  .type = OPTIONS_TABLE_CHOICE,
 	  .scope = OPTIONS_TABLE_WINDOW|OPTIONS_TABLE_PANE,
 	  .choices = options_table_cursor_style_list,
-	  .default_num = 0,
+	  .default_num = 8,
 	  .text = "Style of the cursor."
 	},
 
@@ -643,7 +643,7 @@ const struct options_table_entry options_table[] = {
 	{ .name = "display-panes-colour",
 	  .type = OPTIONS_TABLE_COLOUR,
 	  .scope = OPTIONS_TABLE_SESSION,
-	  .default_num = 4,
+	  .default_num = 0,
 	  .text = "Colour of not active panes for 'display-panes'."
 	},
 
